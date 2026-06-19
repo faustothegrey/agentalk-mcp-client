@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "hash": "43b8d9c534e7a87eca779ea16a0058c724d5159663768b8c18f8173b48fb02ae",
+  "data": {
+    "mcpTools": [
+      "send_to_agent",
+      "submit_plan",
+      "await_turn",
+      "request_human_intervention",
+      "request_file_content"
+    ],
+    "messageTypes": [
+      "message_received",
+      "agreement_proposal",
+      "agreement_acceptance",
+      "plan_submission",
+      "planning_phase_complete",
+      "turn_complete",
+      "turn_error"
+    ],
+    "packetTypes": [
+      "READY",
+      "REQ",
+      "RES",
+      "EVT"
+    ],
+    "protocolPrefix": "[AgentTalk]:"
+  }
+}
