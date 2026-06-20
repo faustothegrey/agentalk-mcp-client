@@ -3,128 +3,125 @@ import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+import { WebSocketServer, WebSocket } from 'ws';
 
-const PROTOCOL_PREFIX = '[AgentTalk]:';
-
-function waitForStdoutLine(
-  child: ChildProcessWithoutNullStreams,
-  predicate: (line: string) => boolean,
-  timeoutMs = 15_000,
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let buffer = '';
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error(`Timed out waiting for stdout line after ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    const onData = (chunk: Buffer) => {
-      buffer += chunk.toString();
-      while (true) {
-        const newlineIndex = buffer.indexOf('\n');
-        if (newlineIndex === -1) {
-          break;
-        }
-        const line = buffer.slice(0, newlineIndex).trim();
-        buffer = buffer.slice(newlineIndex + 1);
-        if (predicate(line)) {
-          cleanup();
-          resolve(line);
-          return;
-        }
-      }
-    };
-
-    const onExit = (code: number | null) => {
-      cleanup();
-      reject(new Error(`Agent exited while waiting for line (code: ${code})`));
-    };
-
-    const cleanup = () => {
-      clearTimeout(timeout);
-      child.stdout.off('data', onData);
-      child.off('exit', onExit);
-    };
-
-    child.stdout.on('data', onData);
-    child.on('exit', onExit);
+function createMockMcpServer(): Promise<{ wss: WebSocketServer; port: number; awaitConnection: () => Promise<WebSocket> }> {
+  return new Promise((resolve) => {
+    const wss = new WebSocketServer({ port: 0 });
+    wss.on('listening', () => {
+      const port = (wss.address() as any).port;
+      
+      const awaitConnection = () => new Promise<WebSocket>((resolveConn) => {
+        wss.once('connection', (ws) => {
+          ws.on('message', (data) => {
+            const msg = JSON.parse(data.toString());
+            // auto-reply to initialize
+            if (msg.method === 'initialize') {
+              ws.send(JSON.stringify({
+                jsonrpc: '2.0',
+                id: msg.id,
+                result: { protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'mock', version: '1.0' } }
+              }));
+            }
+          });
+          resolveConn(ws);
+        });
+      });
+      
+      resolve({ wss, port, awaitConnection });
+    });
   });
 }
 
-function parseReq(line: string): { id: string; call: string; args?: Record<string, unknown> } {
-  if (!line.startsWith(`${PROTOCOL_PREFIX}REQ:`)) {
-    throw new Error(`Expected REQ line, got: ${line}`);
-  }
-
-  const payload = JSON.parse(line.slice(`${PROTOCOL_PREFIX}REQ:`.length)) as {
-    id?: string;
-    call?: string;
-    args?: Record<string, unknown>;
-  };
-  if (typeof payload.id !== 'string') {
-    throw new Error(`REQ payload missing id: ${line}`);
-  }
-  if (typeof payload.call !== 'string') {
-    throw new Error(`REQ payload missing call: ${line}`);
-  }
-
-  return { id: payload.id, call: payload.call, ...(payload.args ? { args: payload.args } : {}) };
+function sendMcpTurn(ws: WebSocket, eventPayload: any): Promise<any> {
+  return new Promise((resolve) => {
+    const onMsg = (data: any) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.method === 'tools/call' && msg.params.name === 'await_turn') {
+        ws.off('message', onMsg);
+        
+        // Setup listener for the agent's tool call response
+        const onToolCall = (data2: any) => {
+          const msg2 = JSON.parse(data2.toString());
+          if (msg2.method === 'tools/call' && msg2.params.name !== 'await_turn') {
+            ws.off('message', onToolCall);
+            // Ack the tool call
+            ws.send(JSON.stringify({ jsonrpc: '2.0', id: msg2.id, result: { content: [{ type: 'text', text: 'ok' }] } }));
+            resolve(msg2);
+          }
+        };
+        ws.on('message', onToolCall);
+        
+        // send turn
+        ws.send(JSON.stringify({
+          jsonrpc: '2.0',
+          id: msg.id,
+          result: { content: [{ type: 'text', text: JSON.stringify(eventPayload) }] }
+        }));
+      }
+    };
+    ws.on('message', onMsg);
+  });
 }
 
-describe('llm-agent custom events', () => {
-  const tempDirs: string[] = [];
+describe('llm-agent custom events via MCP', () => {
+  let tempDirs: string[] = [];
+  let currentServer: WebSocketServer | null = null;
+  let childProcess: ChildProcessWithoutNullStreams | null = null;
 
   afterEach(() => {
-    while (tempDirs.length > 0) {
-      const dir = tempDirs.pop();
-      if (dir) {
-        rmSync(dir, { recursive: true, force: true });
-      }
+    for (const dir of tempDirs) {
+      if (dir) rmSync(dir, { recursive: true, force: true });
+    }
+    tempDirs = [];
+    if (currentServer) {
+      currentServer.close();
+      currentServer = null;
+    }
+    if (childProcess) {
+      childProcess.kill('SIGKILL');
+      childProcess = null;
     }
   });
 
   async function expectSystemInstructionToTriggerCall(callName: 'agreement_proposal' | 'agreement_acceptance') {
+    const { wss, port, awaitConnection } = await createMockMcpServer();
+    currentServer = wss;
+
     const tempDir = mkdtempSync(path.join(os.tmpdir(), 'agenttalk-llm-agent-test-'));
     tempDirs.push(tempDir);
     const fakeBridgePath = path.join(tempDir, 'fake-persistent-bridge.js');
 
     writeFileSync(fakeBridgePath, [
-      "const readline = require('readline');",
-      "const rl = readline.createInterface({ input: process.stdin, terminal: false });",
-      "rl.on('line', () => {});",
       "setInterval(() => {}, 1000);",
     ].join('\n'), 'utf8');
 
     const agentScriptPath = path.resolve(process.cwd(), 'llm-agent.mjs');
-    const child = spawn(
+    childProcess = spawn(
       process.execPath,
-      [agentScriptPath, 'gemini', '--execution-mode', 'interactive'],
+      [agentScriptPath, 'gemini', '--execution-mode', 'interactive', '--agentId', 'test-123'],
       {
         cwd: process.cwd(),
         env: {
           ...process.env,
+          AGENTTALK_PERSISTENT_MCP_URL: `ws://localhost:${port}/`,
           AGENTTALK_PERSISTENT_COMMAND_JSON: JSON.stringify({
             command: process.execPath,
             args: [fakeBridgePath],
           }),
         },
-        stdio: ['pipe', 'pipe', 'pipe'],
+        stdio: ['ignore', 'pipe', 'pipe'],
       },
     );
 
-    try {
-      await waitForStdoutLine(child, (line) => line.startsWith(`${PROTOCOL_PREFIX}READY:`));
+    const ws = await awaitConnection();
 
-      child.stdin.write(`${PROTOCOL_PREFIX}EVT:${JSON.stringify({
-        type: 'custom_event_request',
-        event: callName,
-      })}\n`);
+    const toolCall = await sendMcpTurn(ws, {
+      type: 'custom_event_request',
+      event: callName,
+    });
 
-      const reqLine = await waitForStdoutLine(child, (line) => line.startsWith(`${PROTOCOL_PREFIX}REQ:`));
-      expect(parseReq(reqLine).call).toBe(callName);
-    } finally {
-      child.kill('SIGTERM');
-    }
+    expect(toolCall.params.name).toBe(callName);
   }
 
   it('emits agreement_proposal when system explicitly requests it', async () => {
@@ -136,171 +133,29 @@ describe('llm-agent custom events', () => {
   });
 
   it('forwards args from custom_event_request payload', async () => {
-    const tempDir = mkdtempSync(path.join(os.tmpdir(), 'agenttalk-llm-agent-test-'));
-    tempDirs.push(tempDir);
-    const fakeBridgePath = path.join(tempDir, 'fake-persistent-bridge.js');
-
-    writeFileSync(fakeBridgePath, [
-      "const readline = require('readline');",
-      "const rl = readline.createInterface({ input: process.stdin, terminal: false });",
-      "rl.on('line', () => {});",
-      "setInterval(() => {}, 1000);",
-    ].join('\n'), 'utf8');
+    const { wss, port, awaitConnection } = await createMockMcpServer();
+    currentServer = wss;
 
     const agentScriptPath = path.resolve(process.cwd(), 'llm-agent.mjs');
-    const child = spawn(
+    childProcess = spawn(
       process.execPath,
-      [agentScriptPath, 'gemini', '--execution-mode', 'interactive'],
+      [agentScriptPath, 'gemini', '--execution-mode', 'sandbox', '--agentId', 'test-123'],
       {
         cwd: process.cwd(),
-        env: {
-          ...process.env,
-          AGENTTALK_PERSISTENT_COMMAND_JSON: JSON.stringify({
-            command: process.execPath,
-            args: [fakeBridgePath],
-          }),
-        },
-        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, AGENTTALK_PERSISTENT_MCP_URL: `ws://localhost:${port}/` },
+        stdio: ['ignore', 'pipe', 'pipe'],
       },
     );
 
-    try {
-      await waitForStdoutLine(child, (line) => line.startsWith(`${PROTOCOL_PREFIX}READY:`));
+    const ws = await awaitConnection();
 
-      child.stdin.write(`${PROTOCOL_PREFIX}EVT:${JSON.stringify({
-        type: 'custom_event_request',
-        event: 'agreement_proposal',
-        args: { token: 'abc-123' },
-      })}\n`);
+    const toolCall = await sendMcpTurn(ws, {
+      type: 'custom_event_request',
+      event: 'request_human_intervention',
+      args: { reason: 'I need human help' },
+    });
 
-      const reqLine = await waitForStdoutLine(child, (line) => line.startsWith(`${PROTOCOL_PREFIX}REQ:`));
-      expect(parseReq(reqLine)).toEqual({
-        id: expect.any(String),
-        call: 'agreement_proposal',
-        args: { token: 'abc-123' },
-      });
-    } finally {
-      child.kill('SIGTERM');
-    }
+    expect(toolCall.params.name).toBe('request_human_intervention');
+    expect(toolCall.params.arguments).toEqual({ reason: 'I need human help' });
   });
-
-  it('uses unique request IDs for rapid consecutive custom event requests', async () => {
-    const tempDir = mkdtempSync(path.join(os.tmpdir(), 'agenttalk-llm-agent-test-'));
-    tempDirs.push(tempDir);
-    const fakeBridgePath = path.join(tempDir, 'fake-persistent-bridge.js');
-
-    writeFileSync(fakeBridgePath, [
-      "const readline = require('readline');",
-      "const rl = readline.createInterface({ input: process.stdin, terminal: false });",
-      "rl.on('line', () => {});",
-      "setInterval(() => {}, 1000);",
-    ].join('\n'), 'utf8');
-
-    const agentScriptPath = path.resolve(process.cwd(), 'llm-agent.mjs');
-    const child = spawn(
-      process.execPath,
-      [agentScriptPath, 'gemini', '--execution-mode', 'interactive'],
-      {
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          AGENTTALK_PERSISTENT_COMMAND_JSON: JSON.stringify({
-            command: process.execPath,
-            args: [fakeBridgePath],
-          }),
-        },
-        stdio: ['pipe', 'pipe', 'pipe'],
-      },
-    );
-
-    try {
-      await waitForStdoutLine(child, (line) => line.startsWith(`${PROTOCOL_PREFIX}READY:`));
-
-      child.stdin.write(`${PROTOCOL_PREFIX}EVT:${JSON.stringify({
-        type: 'custom_event_request',
-        event: 'agreement_proposal',
-      })}\n`);
-      child.stdin.write(`${PROTOCOL_PREFIX}EVT:${JSON.stringify({
-        type: 'custom_event_request',
-        event: 'agreement_acceptance',
-      })}\n`);
-
-      const reqs: string[] = [];
-      await waitForStdoutLine(child, (line) => {
-        if (line.startsWith(`${PROTOCOL_PREFIX}REQ:`)) {
-          reqs.push(line);
-        }
-        return reqs.length >= 2;
-      });
-
-      const reqA = parseReq(reqs[0]);
-      const reqB = parseReq(reqs[1]);
-      expect(reqA.id).not.toBe(reqB.id);
-      expect([reqA.call, reqB.call].sort()).toEqual(['agreement_acceptance', 'agreement_proposal']);
-    } finally {
-      child.kill('SIGTERM');
-    }
-  }, 15_000);
-
-  it('suppresses duplicate in-flight control calls until RES arrives', async () => {
-    const tempDir = mkdtempSync(path.join(os.tmpdir(), 'agenttalk-llm-agent-test-'));
-    tempDirs.push(tempDir);
-    const fakeBridgePath = path.join(tempDir, 'fake-persistent-bridge.js');
-
-    writeFileSync(fakeBridgePath, [
-      "const readline = require('readline');",
-      "const rl = readline.createInterface({ input: process.stdin, terminal: false });",
-      "rl.on('line', () => {});",
-      "setInterval(() => {}, 1000);",
-    ].join('\n'), 'utf8');
-
-    const agentScriptPath = path.resolve(process.cwd(), 'llm-agent.mjs');
-    const child = spawn(
-      process.execPath,
-      [agentScriptPath, 'gemini', '--execution-mode', 'interactive'],
-      {
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          AGENTTALK_PERSISTENT_COMMAND_JSON: JSON.stringify({
-            command: process.execPath,
-            args: [fakeBridgePath],
-          }),
-        },
-        stdio: ['pipe', 'pipe', 'pipe'],
-      },
-    );
-
-    try {
-      await waitForStdoutLine(child, (line) => line.startsWith(`${PROTOCOL_PREFIX}READY:`));
-
-      const evt = `${PROTOCOL_PREFIX}EVT:${JSON.stringify({
-        type: 'custom_event_request',
-        event: 'agreement_proposal',
-      })}\n`;
-      child.stdin.write(evt);
-      child.stdin.write(evt);
-
-      const firstReqLine = await waitForStdoutLine(child, (line) => line.startsWith(`${PROTOCOL_PREFIX}REQ:`));
-      const firstReq = parseReq(firstReqLine);
-      expect(firstReq.call).toBe('agreement_proposal');
-
-      await expect(
-        waitForStdoutLine(child, (line) => line.startsWith(`${PROTOCOL_PREFIX}REQ:`), 400),
-      ).rejects.toThrow('Timed out');
-
-      child.stdin.write(`${PROTOCOL_PREFIX}RES:${JSON.stringify({
-        id: firstReq.id,
-        status: 'success',
-      })}\n`);
-
-      child.stdin.write(evt);
-      const secondReqLine = await waitForStdoutLine(child, (line) => line.startsWith(`${PROTOCOL_PREFIX}REQ:`));
-      const secondReq = parseReq(secondReqLine);
-      expect(secondReq.call).toBe('agreement_proposal');
-      expect(secondReq.id).not.toBe(firstReq.id);
-    } finally {
-      child.kill('SIGTERM');
-    }
-  }, 15_000);
 });

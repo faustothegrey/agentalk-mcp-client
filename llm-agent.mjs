@@ -7,7 +7,7 @@ import path from 'path';
 import { createConversationRuntime, extractCallMarkers, extractSystemRequiredCall } from './lib/conversation-runtime.mjs';
 import { createRequestIdGenerator } from './lib/request-id.mjs';
 import { createExecutor, normalizeRequestedExecutionMode } from './lib/executor-runtime.mjs';
-import { emitEvent, emitReady, emitRequest, parseInboundProtocolLine } from './lib/protocol.mjs';
+import { McpClient } from './lib/mcp-client.mjs';
 import { getProviderLimit, resolveProvider } from './lib/provider-runtime.mjs';
 import {
   parseStructuredResponse,
@@ -17,15 +17,18 @@ import {
 } from './lib/response-schema.mjs';
 
 function parseArgs(argv) {
-  const provider = argv[2] ?? 'gemini';
+  const providerIndex = argv.indexOf('--provider');
+  const provider = providerIndex !== -1 && argv[providerIndex + 1] ? argv[providerIndex + 1] : 'gemini';
   const modelIndex = argv.indexOf('--model');
   const model = modelIndex !== -1 && argv[modelIndex + 1] ? argv[modelIndex + 1] : null;
   const executionModeIndex = argv.indexOf('--execution-mode');
   const executionMode = executionModeIndex !== -1 && argv[executionModeIndex + 1]
     ? argv[executionModeIndex + 1]
     : process.env.AGENTTALK_EXECUTION_MODE;
+  const agentIdIndex = argv.indexOf('--agentId');
+  const agentId = agentIdIndex !== -1 && argv[agentIdIndex + 1] ? argv[agentIdIndex + 1] : null;
 
-  return { provider, model, executionMode };
+  return { provider, model, executionMode, agentId };
 }
 
 function parsePersistentCommandOverrideFromEnv() {
@@ -62,6 +65,7 @@ const {
   provider: providerName,
   model: selectedModel,
   executionMode: requestedExecutionModeInput,
+  agentId,
 } = parseArgs(process.argv);
 const provider = resolveProvider(providerName.toLowerCase());
 const limit = getProviderLimit(provider, selectedModel);
@@ -79,6 +83,8 @@ let currentUsage = 0;
 let busy = false;
 const messageQueue = [];
 const conversationRuntime = createConversationRuntime();
+let mcpClient;
+let isShuttingDown = false;
 const nextRequestId = createRequestIdGenerator();
 const CONTROL_CALLS = new Set(['agreement_proposal', 'agreement_acceptance', 'ack_planning_protocol']);
 const pendingControlCalls = new Set();
@@ -100,8 +106,7 @@ function enqueueEvent(evt) {
 }
 
 function emitTrackedRequest(request) {
-  if (!request || typeof request !== 'object' || typeof request.call !== 'string' || typeof request.id !== 'string') {
-    emitRequest(request);
+  if (!request || typeof request !== 'object' || typeof request.call !== 'string') {
     return true;
   }
 
@@ -111,57 +116,30 @@ function emitTrackedRequest(request) {
     return false;
   }
 
-  emitRequest(request);
-
   if (CONTROL_CALLS.has(call)) {
     pendingControlCalls.add(call);
-    pendingControlRequestIds.set(request.id, call);
   }
 
-  return true;
-}
-
-function handleResponseLine(payloadText) {
-  let payload;
-  try {
-    payload = JSON.parse(payloadText);
-  } catch {
-    return;
-  }
-
-  if (!payload || typeof payload !== 'object' || typeof payload.id !== 'string') {
-    return;
-  }
-
-  const call = pendingControlRequestIds.get(payload.id);
-  if (!call) {
-    return;
-  }
-
-  pendingControlRequestIds.delete(payload.id);
-  pendingControlCalls.delete(call);
-
-  // If a protocol call was rejected, feed the error back into the conversation
-  // so the LLM can revise (e.g. submit_plan rejected for not being concrete enough)
-  if (payload.status === 'error' && typeof payload.error === 'string') {
-    const errorMessage = `[System] Your ${call} call was rejected: ${payload.error}. Please revise and try again.`;
-    console.error(`[llm-agent] Protocol call ${call} rejected: ${payload.error}`);
+  mcpClient.callTool(request.call, request.args || {}).then(() => {
+    if (CONTROL_CALLS.has(call)) {
+      pendingControlCalls.delete(call);
+    }
+  }).catch((err) => {
+    if (CONTROL_CALLS.has(call)) {
+      pendingControlCalls.delete(call);
+    }
+    const errorMessage = `[System] Your ${call} call was rejected: ${err.message}. Please revise and try again.`;
+    console.error(`[llm-agent] Protocol call ${call} rejected: ${err.message}`);
     enqueueEvent({
       type: 'message_received',
       from: 'system',
       payload: errorMessage,
     });
-  }
+  });
+
+  return true;
 }
 
-function emitSessionUpdate() {
-  emitEvent({
-    type: 'session_update',
-    sessionStatus: executor.getStatus(),
-    requestedExecutionMode: normalizedRequestedExecutionMode,
-    resolvedExecutionMode,
-  });
-}
 
 async function executePrompt(idPrefix, prompt) {
   return executor.executeTurn({
@@ -188,35 +166,25 @@ function dispatchStructuredResponse(evt, structured) {
       break;
     }
     case 'agreement_proposal': {
-      if (structured.message_payload.text) {
-        const messageRequest = conversationRuntime.buildProtocolRequest(evt, structured.message_payload.text);
-        messageRequest.id = nextRequestId();
-        messageRequest.args = { ...messageRequest.args, ...commonArgs };
-        emitTrackedRequest(messageRequest);
-      }
       emitTrackedRequest({
         id: nextRequestId(),
         call: 'agreement_proposal',
         args: {
           ...commonArgs,
           proposal: structured.message_payload.proposal,
+          ...(structured.message_payload.text ? { text: structured.message_payload.text } : {})
         },
       });
       break;
     }
     case 'agreement_acceptance': {
-      if (structured.message_payload.text) {
-        const messageRequest = conversationRuntime.buildProtocolRequest(evt, structured.message_payload.text);
-        messageRequest.id = nextRequestId();
-        messageRequest.args = { ...messageRequest.args, ...commonArgs };
-        emitTrackedRequest(messageRequest);
-      }
       emitTrackedRequest({
         id: nextRequestId(),
         call: 'agreement_acceptance',
         args: {
           ...commonArgs,
           proposal: structured.message_payload.proposal,
+          ...(structured.message_payload.text ? { text: structured.message_payload.text } : {})
         },
       });
       break;
@@ -247,6 +215,14 @@ function dispatchStructuredResponse(evt, structured) {
       emitTrackedRequest(request);
       break;
     }
+    case 'ack_planning_protocol': {
+      emitTrackedRequest({
+        id: nextRequestId(),
+        call: 'ack_planning_protocol',
+        args: {},
+      });
+      break;
+    }
     default: {
       // work_accept / work_refuse should not arrive here (handled in team handlers)
       // but if they do, treat as discussion
@@ -265,12 +241,12 @@ function dispatchStructuredResponse(evt, structured) {
 async function processQueue() {
   if (busy || messageQueue.length === 0) return;
   busy = true;
-  emitEvent({ type: 'busy_state', busy: true });
+    // emitEvent busy_state
 
   const evt = messageQueue.shift();
   if (!evt) {
     busy = false;
-    emitEvent({ type: 'busy_state', busy: false });
+    // emitEvent busy_state
     return;
   }
 
@@ -407,8 +383,8 @@ async function processQueue() {
     });
   } finally {
     busy = false;
-    emitEvent({ type: 'busy_state', busy: false });
-    emitSessionUpdate();
+    // emitEvent busy_state
+    // emitSessionUpdate();
     if (messageQueue.length > 0) {
       void processQueue();
     }
@@ -778,8 +754,17 @@ function handleInboundEvent(evt) {
   }
 
   if (evt.type === 'custom_event_request') {
-    enqueueEvent(evt);
-    return;
+    if (evt.prompt || evt.message) {
+      // Treat as a system message so the LLM responds
+      evt.type = 'message_received';
+      evt.from = 'system';
+      evt.payload = evt.prompt || evt.message;
+      evt.expected_response_types = evt.expected_response_types || [evt.event.trim()];
+      // Fall through to message_received handling
+    } else {
+      enqueueEvent(evt);
+      return;
+    }
   }
 
   if (evt.type === 'message_received' || evt.type === 'healthcheck') {
@@ -815,49 +800,52 @@ function handleInboundEvent(evt) {
   }
 }
 
-function handleInboundLine(line) {
-  const parsed = parseInboundProtocolLine(line);
-  if (!parsed) {
-    return;
-  }
 
-  if (parsed.type === 'EVT') {
-    try {
-      handleInboundEvent(JSON.parse(parsed.json));
-    } catch {
-      console.error('[llm-agent] Failed to parse EVT:', parsed.json);
-    }
-    return;
-  }
-
-  if (parsed.type === 'RES') {
-    handleResponseLine(parsed.json);
-    console.error(`[llm-agent] Got RES: ${line}`);
-    return;
-  }
-
-  console.error(`[llm-agent] Unknown protocol: ${line}`);
-}
 
 async function main() {
-  await executor.initialize();
+  if (!agentId) {
+    console.error("Usage: node llm-agent.mjs --agentId <id> --provider <provider> ...");
+    process.exit(1);
+  }
 
-  emitReady({
-    session: `agent-${provider}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    requestedExecutionMode: normalizedRequestedExecutionMode,
-    resolvedExecutionMode,
-    sessionStatus: executor.getStatus(),
-  });
+  await executor.initialize();
+  
   console.error(
     `[llm-agent] Provider: ${provider}, Model: ${selectedModel || 'default'}, Token Limit: ${limit}, Execution Mode: ${normalizedRequestedExecutionMode} -> ${resolvedExecutionMode}`,
   );
 
-  const rl = createInterface({ input: process.stdin, terminal: false });
-  rl.on('line', (line) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    handleInboundLine(trimmed);
-  });
+  const mcpUrl = process.env.AGENTTALK_PERSISTENT_MCP_URL || `ws://localhost:3000/mcp`;
+  mcpClient = new McpClient(`${mcpUrl}?agentId=${agentId}`);
+  await mcpClient.connect();
+
+  let loopActive = false;
+  async function loop() {
+    if (loopActive) return;
+    loopActive = true;
+    try {
+      while (!isShuttingDown && mcpClient.ws.readyState === 1 /* OPEN */) {
+        console.error(`[llm-agent] Waiting for turn...`);
+        const turn = await mcpClient.callTool('await_turn', {});
+        const evt = JSON.parse(turn.content[0].text);
+        console.error(`[llm-agent] Received turn:`, evt);
+        
+        handleInboundEvent(evt);
+        
+        // Wait for queue to drain before pulling next turn
+        while (messageQueue.length > 0 || busy) {
+          await new Promise(r => setTimeout(r, 50));
+        }
+      }
+    } catch (err) {
+      console.error(`[llm-agent] Turn loop error:`, err);
+      isShuttingDown = true;
+      mcpClient.close(1011, `CLI failure: ${err.message}`);
+    } finally {
+      loopActive = false;
+    }
+  }
+
+  loop();
 }
 
 main().catch((err) => {
