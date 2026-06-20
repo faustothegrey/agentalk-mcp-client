@@ -1,13 +1,19 @@
 {
-  "version": 1,
-  "hash": "43b8d9c534e7a87eca779ea16a0058c724d5159663768b8c18f8173b48fb02ae",
+  "version": 2,
+  "hash": "bce925ec1cc71c4a333d44b1b3a138c9259aa6d26012a10a23186a674c76b437",
   "data": {
     "mcpTools": [
+      "list_agents",
       "send_to_agent",
+      "agreement_proposal",
+      "agreement_acceptance",
+      "ack_planning_protocol",
+      "fact_collection_end",
       "submit_plan",
-      "await_turn",
-      "request_human_intervention",
-      "request_file_content"
+      "submit_work_response",
+      "submit_work_result",
+      "submit_usage_stats",
+      "await_turn"
     ],
     "messageTypes": [
       "message_received",
