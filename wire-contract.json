@@ -1,6 +1,6 @@
 {
-  "version": 3,
-  "hash": "4b2efec9eff37a4ce6ac6fdf43060db070ad361c3e54f1f9c2aa92eb15cfe8ab",
+  "version": 4,
+  "hash": "97abf699aadb4e5dbf41f10f9d41bb6d96bf40f4fccf1a6853def9a3869289a5",
   "data": {
     "mcpTools": [
       "list_agents",
@@ -13,7 +13,8 @@
       "submit_work_response",
       "submit_work_result",
       "submit_usage_stats",
-      "await_turn"
+      "await_turn",
+      "submit_exec_result"
     ],
     "messageTypes": [
       "ack_planning_protocol",
