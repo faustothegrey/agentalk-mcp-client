@@ -726,7 +726,50 @@ function handleBrainstormMessage(evt) {
   });
 }
 
+function handleExecRpc(evt) {
+  busy = true;
+  executor.executeTurn({
+    id: `exec-${Date.now()}`,
+    prompt: evt.prompt,
+    onStderrChunk: (chunk) => process.stderr.write(chunk),
+  }, {
+    onReplyChunk: () => {}, 
+  }).then(async (result) => {
+    try {
+      await mcpClient.callTool('submit_exec_result', {
+        text: result.response,
+        usage: {
+          prompt_tokens: result.tokenDetails?.input || 0,
+          completion_tokens: result.tokenDetails?.output || 0
+        }
+      });
+    } catch (err) {
+      console.error(`[llm-agent] Failed to submit exec result:`, err);
+    } finally {
+      busy = false;
+      setTimeout(processQueue, 0);
+    }
+  }).catch(async (err) => {
+    console.error(`[llm-agent] exec_rpc failed:`, err);
+    try {
+      await mcpClient.callTool('submit_exec_result', {
+        text: `ERROR: ${err.message}`,
+      });
+    } catch (submitErr) {
+      console.error(`[llm-agent] Failed to submit exec error:`, submitErr);
+    } finally {
+      busy = false;
+      setTimeout(processQueue, 0);
+    }
+  });
+}
+
 function handleInboundEvent(evt) {
+  if (evt.type === 'exec_rpc') {
+    handleExecRpc(evt);
+    return;
+  }
+
   if (evt.type === 'fact_collection_begin') {
     handleFactCollectionBegin(evt);
     return;
