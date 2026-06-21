@@ -558,98 +558,6 @@ function handleTeamTaskAssign(evt) {
   });
 }
 
-function handleTeamWorkAssign(evt) {
-  console.error(`[llm-agent] Team work assigned (worker): ${evt.description}`);
-  const prompt = [
-    'You are the WORKER in a two-agent team. The planner has created a plan for you to review.',
-    'Critically evaluate the plan. Consider:',
-    '- Is the approach sound?',
-    '- Are there risks or missing steps?',
-    '- Can you realistically execute this?',
-    '- Can you execute it strictly inside a `git worktree`?',
-    '',
-    'You must use strictly `git worktree` for this task.',
-    'If you cannot or will not use a git worktree, you must refuse and abort the task.',
-    '',
-    `Original task: ${evt.description}`,
-    '',
-    `Planner\'s plan:`,
-    evt.plan,
-    WORKER_RESPONSE_INSTRUCTIONS,
-  ].join('\n');
-
-  enqueueTeamEvent(evt, prompt, (response) => {
-    // Try structured JSON parsing first
-    let structured = parseStructuredResponse(response);
-    if (!structured) {
-      // Fallback to legacy ACCEPT/REFUSE parsing
-      console.error('[llm-agent] Worker structured parse failed, falling back to legacy ACCEPT/REFUSE');
-      const firstLine = response.split('\n')[0].trim();
-      if (firstLine.startsWith('REFUSE:') || firstLine === 'REFUSE') {
-        const reason = firstLine.replace(/^REFUSE:?\s*/, '') || 'No specific reason given';
-        return {
-          id: nextRequestId(),
-          call: 'submit_work_response',
-          args: { accepted: false, reason },
-        };
-      }
-
-      const workOutput = response.replace(/^ACCEPT\s*\n?/, '').trim();
-      return [
-        {
-          id: nextRequestId(),
-          call: 'submit_work_response',
-          args: { accepted: true },
-        },
-        {
-          id: nextRequestId(),
-          call: 'submit_work_result',
-          args: { result: workOutput || 'Task completed.' },
-        },
-      ];
-    }
-
-    console.error(`[llm-agent] Worker structured response: message_type=${structured.message_type}`);
-
-    if (structured.message_type === 'work_refuse') {
-      return {
-        id: nextRequestId(),
-        call: 'submit_work_response',
-        args: { accepted: false, reason: structured.message_payload.reason },
-      };
-    }
-
-    if (structured.message_type === 'work_accept') {
-      return [
-        {
-          id: nextRequestId(),
-          call: 'submit_work_response',
-          args: { accepted: true },
-        },
-        {
-          id: nextRequestId(),
-          call: 'submit_work_result',
-          args: { result: structured.message_payload.text || 'Task completed.' },
-        },
-      ];
-    }
-
-    // Unexpected type — treat as acceptance with text
-    const text = structured.message_payload.text || structured.message_payload.plan || structured.message_payload.reason || '';
-    return [
-      {
-        id: nextRequestId(),
-        call: 'submit_work_response',
-        args: { accepted: true },
-      },
-      {
-        id: nextRequestId(),
-        call: 'submit_work_result',
-        args: { result: text || 'Task completed.' },
-      },
-    ];
-  });
-}
 
 function enqueueTeamEvent(evt, prompt, buildRequest) {
   messageQueue.push({ _teamPrompt: prompt, _buildRequest: buildRequest, ...evt });
@@ -734,6 +642,8 @@ function handleExecRpc(evt) {
     onStderrChunk: (chunk) => process.stderr.write(chunk),
   }, {
     onReplyChunk: () => {}, 
+    cwd: evt.cwd,
+    timeoutMs: evt.timeoutMs,
   }).then(async (result) => {
     try {
       await mcpClient.callTool('submit_exec_result', {
@@ -777,11 +687,6 @@ function handleInboundEvent(evt) {
 
   if (evt.type === 'team_task_assign') {
     handleTeamTaskAssign(evt);
-    return;
-  }
-
-  if (evt.type === 'team_work_assign') {
-    handleTeamWorkAssign(evt);
     return;
   }
 
