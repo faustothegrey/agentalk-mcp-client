@@ -734,6 +734,8 @@ function handleExecRpc(evt) {
     onStderrChunk: (chunk) => process.stderr.write(chunk),
   }, {
     onReplyChunk: () => {}, 
+    cwd: evt.cwd,
+    timeoutMs: evt.timeoutMs,
   }).then(async (result) => {
     try {
       await mcpClient.callTool('submit_exec_result', {
