@@ -64,7 +64,7 @@ function sendMcpTurn(ws: WebSocket, eventPayload: any): Promise<any> {
   });
 }
 
-describe('llm-agent custom events via MCP', () => {
+describe('llm-agent exec-rpc via MCP', () => {
   let tempDirs: string[] = [];
   let currentServer: WebSocketServer | null = null;
   let childProcess: ChildProcessWithoutNullStreams | null = null;
@@ -84,22 +84,27 @@ describe('llm-agent custom events via MCP', () => {
     }
   });
 
-  async function expectSystemInstructionToTriggerCall(callName: 'agreement_proposal' | 'agreement_acceptance') {
+  it('handles exec_rpc correctly and submits result', async () => {
     const { wss, port, awaitConnection } = await createMockMcpServer();
     currentServer = wss;
 
     const tempDir = mkdtempSync(path.join(os.tmpdir(), 'agenttalk-llm-agent-test-'));
     tempDirs.push(tempDir);
+    
+    // We use a fake persistent bridge that just echoes
     const fakeBridgePath = path.join(tempDir, 'fake-persistent-bridge.js');
-
     writeFileSync(fakeBridgePath, [
-      "setInterval(() => {}, 1000);",
+      "const readline = require('readline');",
+      "const rl = readline.createInterface({ input: process.stdin, output: process.stdout });",
+      "rl.on('line', (line) => {",
+      "  console.log(JSON.stringify({ type: 'result', result: 'mocked reply', usage: { input_tokens: 10, output_tokens: 20 } }));",
+      "});"
     ].join('\n'), 'utf8');
 
     const agentScriptPath = path.resolve(process.cwd(), 'llm-agent.mjs');
     childProcess = spawn(
       process.execPath,
-      [agentScriptPath, 'gemini', '--execution-mode', 'interactive', '--agentId', 'test-123'],
+      [agentScriptPath, '--provider', 'gemini', '--execution-mode', 'persistent', '--agentId', 'test-123'],
       {
         cwd: process.cwd(),
         env: {
@@ -110,52 +115,21 @@ describe('llm-agent custom events via MCP', () => {
             args: [fakeBridgePath],
           }),
         },
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: 'inherit',
       },
     );
 
     const ws = await awaitConnection();
 
     const toolCall = await sendMcpTurn(ws, {
-      type: 'custom_event_request',
-      event: callName,
+      type: 'exec_rpc',
+      prompt: 'hello world',
     });
 
-    expect(toolCall.params.name).toBe(callName);
-  }
-
-  it('emits agreement_proposal when system explicitly requests it', async () => {
-    await expectSystemInstructionToTriggerCall('agreement_proposal');
-  });
-
-  it('emits agreement_acceptance when system explicitly requests it', async () => {
-    await expectSystemInstructionToTriggerCall('agreement_acceptance');
-  });
-
-  it('forwards args from custom_event_request payload', async () => {
-    const { wss, port, awaitConnection } = await createMockMcpServer();
-    currentServer = wss;
-
-    const agentScriptPath = path.resolve(process.cwd(), 'llm-agent.mjs');
-    childProcess = spawn(
-      process.execPath,
-      [agentScriptPath, 'gemini', '--execution-mode', 'sandbox', '--agentId', 'test-123'],
-      {
-        cwd: process.cwd(),
-        env: { ...process.env, AGENTTALK_PERSISTENT_MCP_URL: `ws://localhost:${port}/` },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    );
-
-    const ws = await awaitConnection();
-
-    const toolCall = await sendMcpTurn(ws, {
-      type: 'custom_event_request',
-      event: 'request_human_intervention',
-      args: { reason: 'I need human help' },
+    expect(toolCall.params.name).toBe('submit_exec_result');
+    expect(toolCall.params.arguments).toEqual({
+      text: 'mocked reply',
+      usage: { prompt_tokens: 10, completion_tokens: 20 }
     });
-
-    expect(toolCall.params.name).toBe('request_human_intervention');
-    expect(toolCall.params.arguments).toEqual({ reason: 'I need human help' });
   });
 });
