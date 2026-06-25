@@ -1,6 +1,6 @@
 {
-  "version": 4,
-  "hash": "97abf699aadb4e5dbf41f10f9d41bb6d96bf40f4fccf1a6853def9a3869289a5",
+  "version": 5,
+  "hash": "1236003f9db2a7110879855bbdc66c7aa5b7c19dbab28f2bdcdb463cd1ac9883",
   "data": {
     "mcpTools": [
       "list_agents",
@@ -15,16 +15,6 @@
       "submit_usage_stats",
       "await_turn",
       "submit_exec_result"
-    ],
-    "messageTypes": [
-      "ack_planning_protocol",
-      "fact_collection_end",
-      "opinion",
-      "agreement_proposal",
-      "agreement_acceptance",
-      "submit_plan",
-      "work_accept",
-      "work_refuse"
     ],
     "packetTypes": [
       "READY",
