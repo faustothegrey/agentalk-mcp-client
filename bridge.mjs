@@ -26,19 +26,47 @@ ws.addEventListener('close', (ev) => {
     process.exit(isNormal ? 0 : 1);
 });
 ws.addEventListener('error', (ev) => {
-    const errMsg = ev?.message || String(ev?.error || ev || '');
+    const errMsg = ev?.error?.stack || ev?.message || String(ev?.error || ev || '');
     log('ws error', errMsg);
     process.exit(1);
 });
+let contractHashFromUrl = null;
+try {
+    contractHashFromUrl = new URL(url).searchParams.get('contractHash');
+} catch (e) {
+    // Ignore URL parse errors
+}
+
 const rl = createInterface({ input: process.stdin });
 rl.on('line', (line) => {
     const s = line.trim();
     if (!s)
         return;
+        
+    let payload = s;
+    if (s.includes('"method":"initialize"') || s.includes('"method": "initialize"')) {
+        try {
+            const parsed = JSON.parse(s);
+            if (parsed.method === 'initialize' && parsed.params && parsed.params.clientInfo) {
+                if (!parsed.params.clientInfo.contractHash) {
+                    if (contractHashFromUrl) {
+                        parsed.params.clientInfo.contractHash = contractHashFromUrl;
+                        payload = JSON.stringify(parsed);
+                        log('injected contractHash from URL');
+                    } else {
+                        log('URL lacks contractHash, relaying unchanged');
+                    }
+                }
+            }
+        } catch {
+            // ignore parse errors, pass through unchanged
+        }
+    }
+    
     if (wsOpen)
-        ws.send(s);
+        ws.send(payload);
     else
-        outbox.push(s);
+        outbox.push(payload);
 });
 rl.on('close', () => {
     log('stdin closed');
