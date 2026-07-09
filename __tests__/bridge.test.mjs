@@ -14,7 +14,7 @@ async function runTest(url, inputLines, expectedPayloads, expectedStderrLines) {
         const wss = new WebSocketServer({ server });
         const received = [];
         let connected = false;
-        
+
         wss.on('connection', (ws) => {
             connected = true;
             ws.on('message', (msg) => {
@@ -26,7 +26,7 @@ async function runTest(url, inputLines, expectedPayloads, expectedStderrLines) {
             const port = server.address().port;
             // Build the URL, injecting the port if we have a placeholder
             const fullUrl = url.replace('PORT', port);
-            
+
             const child = spawn(process.execPath, [bridgePath, fullUrl], {
                 stdio: ['pipe', 'pipe', 'pipe']
             });

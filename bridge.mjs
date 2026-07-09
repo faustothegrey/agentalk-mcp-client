@@ -42,7 +42,7 @@ rl.on('line', (line) => {
     const s = line.trim();
     if (!s)
         return;
-        
+
     let payload = s;
     if (s.includes('"method":"initialize"') || s.includes('"method": "initialize"')) {
         try {
@@ -62,7 +62,7 @@ rl.on('line', (line) => {
             // ignore parse errors, pass through unchanged
         }
     }
-    
+
     if (wsOpen)
         ws.send(payload);
     else
