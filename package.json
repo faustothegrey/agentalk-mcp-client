@@ -8,7 +8,9 @@
   "scripts": {
     "lint": "eslint .",
     "test": "vitest run",
-    "build": "npm run lint && npm run test"
+    "verify-contract": "node scripts/verify-contract.js",
+    "sync-contract": "node scripts/sync-wire-contract.js",
+    "build": "npm run lint && npm run verify-contract && npm run test"
   },
   "keywords": [],
   "author": "",
