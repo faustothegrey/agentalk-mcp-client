@@ -1,13 +1,22 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { WebSocketServer, WebSocket } from 'ws';
 
-function createMockMcpServer(): Promise<{ wss: WebSocketServer; port: number; awaitConnection: () => Promise<WebSocket> }> {
+const wireContract = JSON.parse(readFileSync(path.resolve(process.cwd(), 'wire-contract.json'), 'utf8'));
+
+function createMockMcpServer(): Promise<{
+  wss: WebSocketServer;
+  port: number;
+  awaitConnection: () => Promise<WebSocket>;
+  initializeRequests: any[];
+}> {
   return new Promise((resolve) => {
     const wss = new WebSocketServer({ port: 0 });
+    const initializeRequests: any[] = [];
+
     wss.on('listening', () => {
       const port = (wss.address() as any).port;
       
@@ -17,6 +26,7 @@ function createMockMcpServer(): Promise<{ wss: WebSocketServer; port: number; aw
             const msg = JSON.parse(data.toString());
             // auto-reply to initialize
             if (msg.method === 'initialize') {
+              initializeRequests.push(msg);
               ws.send(JSON.stringify({
                 jsonrpc: '2.0',
                 id: msg.id,
@@ -28,7 +38,7 @@ function createMockMcpServer(): Promise<{ wss: WebSocketServer; port: number; aw
         });
       });
       
-      resolve({ wss, port, awaitConnection });
+      resolve({ wss, port, awaitConnection, initializeRequests });
     });
   });
 }
@@ -85,7 +95,7 @@ describe('llm-agent exec-rpc via MCP', () => {
   });
 
   it('handles exec_rpc correctly and submits result', async () => {
-    const { wss, port, awaitConnection } = await createMockMcpServer();
+    const { wss, port, awaitConnection, initializeRequests } = await createMockMcpServer();
     currentServer = wss;
 
     const tempDir = mkdtempSync(path.join(os.tmpdir(), 'agenttalk-llm-agent-test-'));
@@ -126,6 +136,9 @@ describe('llm-agent exec-rpc via MCP', () => {
       prompt: 'hello world',
     });
 
+    expect(initializeRequests).toHaveLength(1);
+    expect(initializeRequests[0].params.clientInfo.contractVersion).toBe(wireContract.version);
+    expect(initializeRequests[0].params.clientInfo.contractHash).toBe(wireContract.hash);
     expect(toolCall.params.name).toBe('submit_exec_result');
     expect(toolCall.params.arguments).toEqual({
       text: 'mocked reply',

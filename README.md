@@ -21,7 +21,7 @@ This client knows how to speak to respective LLM providers (Codex, Claude, Gemin
 Because the Orchestrator and the Client share no common codebase, they communicate using a strictly enforced, byte-identical wire contract.
 
 ### The Wire Contract
-The definition of what a "turn" looks like and what a "reply" looks like is defined in `lib/protocol-payloads.js` (vendored bridge). This is a copy from the Orchestrator's `packages/runtime-core/src/protocol/protocol-payloads.ts`.
+The committed wire-contract source of truth lives in the AgentTalk repo at `packages/contracts/wire-contract.json`. This client keeps a generated copy at `wire-contract.json` so it can advertise the current contract version and hash during the MCP initialize handshake.
 
 To prevent silent drift, a cryptographic hash is checked during the initial MCP handshake:
 1. Both systems compute a SHA-256 hash of their respective wire contract representation.
@@ -29,9 +29,9 @@ To prevent silent drift, a cryptographic hash is checked during the initial MCP 
 3. If the hashes mismatch, the connection is instantly rejected with a `1008 Policy Violation`.
 
 ### How to Realign with the Orchestrator
-If the Orchestrator's protocol changes, you **must** realign this client:
-1. Run the alignment script or manually copy the updated types from the Orchestrator.
-2. Ensure `wire-contract.json` or `lib/protocol-payloads.js` equivalent representation matches identically.
-3. The new hash will then match the Orchestrator's updated hash, allowing connections to succeed.
+If the Orchestrator's protocol changes, realign this client from the AgentTalk source contract:
+1. Run `npm run sync-contract` from this repo. By default it reads `../AgentTalk/packages/contracts/wire-contract.json`; set `AGENTTALK_CONTRACT_PATH=/absolute/path/to/wire-contract.json` for another checkout layout.
+2. Run `npm run verify-contract` or `npm run build`. The verifier checks this client's hash and fails if the client copy diverges from the AgentTalk source when that source is available.
+3. The client will then advertise the updated contract version and hash on its next connection.
 
 *(Note: There is a one-way import guard enforced in lint/build to ensure no direct dependencies are ever created between this repo and the orchestrator).*
