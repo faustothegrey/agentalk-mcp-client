@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   SUPPORTED_PROVIDERS,
   resolveProvider,
@@ -57,5 +57,35 @@ describe('goose provider wiring', () => {
 
   it('returns zeroed usage on unparseable output', () => {
     expect(extractTokenDetails('goose', 'no json here')).toEqual({ input: 0, output: 0 });
+  });
+});
+
+describe('goose coordination profile (env-driven)', () => {
+  const saved = {};
+  const KEYS = ['AGENTTALK_GOOSE_MAX_TURNS', 'AGENTTALK_GOOSE_NO_PROFILE', 'AGENTTALK_GOOSE_SYSTEM'];
+  beforeEach(() => { for (const k of KEYS) { saved[k] = process.env[k]; delete process.env[k]; } });
+  afterEach(() => { for (const k of KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
+
+  it('defaults to --max-turns 30, no --system, no --no-profile', () => {
+    const { args } = getProviderCommand('goose', 'openai/gpt-4o', 'x');
+    expect(args[args.indexOf('--max-turns') + 1]).toBe('30');
+    expect(args).not.toContain('--system');
+    expect(args).not.toContain('--no-profile');
+  });
+
+  it('honors AGENTTALK_GOOSE_MAX_TURNS', () => {
+    process.env.AGENTTALK_GOOSE_MAX_TURNS = '3';
+    const { args } = getProviderCommand('goose', 'openai/gpt-4o', 'x');
+    expect(args[args.indexOf('--max-turns') + 1]).toBe('3');
+  });
+
+  it('adds --no-profile and --system when the coordination env is set', () => {
+    process.env.AGENTTALK_GOOSE_NO_PROFILE = '1';
+    process.env.AGENTTALK_GOOSE_SYSTEM = 'Emit exactly one protocol message.';
+    const { args } = getProviderCommand('goose', 'openai/gpt-4o', 'x');
+    expect(args).toContain('--no-profile');
+    expect(args[args.indexOf('--system') + 1]).toBe('Emit exactly one protocol message.');
+    // prompt still last
+    expect(args[args.indexOf('-t') + 1]).toBe('x');
   });
 });
