@@ -59,11 +59,21 @@ const {
   executionMode: requestedExecutionModeInput,
   agentId,
 } = parseArgs(process.argv);
+
+if (agentId) {
+  process.env.AGENTTALK_AGENT_ID = agentId;
+}
+
 const provider = resolveProvider(providerName.toLowerCase());
 const limit = getProviderLimit(provider, selectedModel);
 const requestedWorkingDirectory = process.env.AGENTTALK_WORKDIR;
 const requestedExecutionMode = normalizeRequestedExecutionMode(requestedExecutionModeInput);
 const persistentCommandOverride = parsePersistentCommandOverrideFromEnv();
+
+function appendAgentId(url, id) {
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}agentId=${encodeURIComponent(id)}`;
+}
 
 if (requestedWorkingDirectory) {
   const resolvedWorkingDirectory = path.resolve(requestedWorkingDirectory);
@@ -93,7 +103,7 @@ function handleExecRpc(evt) {
     prompt: evt.prompt,
     onStderrChunk: (chunk) => process.stderr.write(chunk),
   }, {
-    onReplyChunk: () => {}, 
+    onReplyChunk: () => {},
     cwd: evt.cwd,
     timeoutMs: evt.timeoutMs,
   }).then(async (result) => {
@@ -124,9 +134,49 @@ function handleExecRpc(evt) {
   });
 }
 
+function handleHealthcheck(evt) {
+  busy = true;
+  executor.executeTurn({
+    id: `health-${Date.now()}`,
+    prompt: evt.prompt,
+    onStderrChunk: (chunk) => process.stderr.write(chunk),
+  }, {
+    onReplyChunk: () => {},
+    timeoutMs: evt.timeoutMs,
+  }).then(async (result) => {
+    try {
+      await mcpClient.callTool('healthcheck_ack', {
+        token: evt.token,
+        message: result.response
+      });
+    } catch (err) {
+      console.error(`[llm-agent] Failed to submit healthcheck_ack:`, err);
+    } finally {
+      busy = false;
+    }
+  }).catch(async (err) => {
+    console.error(`[llm-agent] healthcheck failed:`, err);
+    try {
+      await mcpClient.callTool('healthcheck_ack', {
+        token: evt.token,
+        message: `ERROR: ${err.message}`,
+      });
+    } catch (submitErr) {
+      console.error(`[llm-agent] Failed to submit error healthcheck_ack:`, submitErr);
+    } finally {
+      busy = false;
+    }
+  });
+}
+
 function handleInboundEvent(evt) {
   if (evt.type === 'exec_rpc') {
     handleExecRpc(evt);
+    return;
+  }
+
+  if (evt.type === 'healthcheck') {
+    handleHealthcheck(evt);
     return;
   }
 
@@ -150,13 +200,13 @@ async function main() {
   }
 
   await executor.initialize();
-  
+
   console.error(
     `[llm-agent] Provider: ${provider}, Model: ${selectedModel || 'default'}, Token Limit: ${limit}, Execution Mode: ${normalizedRequestedExecutionMode} -> ${resolvedExecutionMode}`,
   );
 
   const mcpUrl = process.env.AGENTTALK_PERSISTENT_MCP_URL || `ws://localhost:3000/mcp`;
-  mcpClient = new McpClient(`${mcpUrl}?agentId=${agentId}`);
+  mcpClient = new McpClient(appendAgentId(mcpUrl, agentId));
   await mcpClient.connect();
 
   let loopActive = false;
@@ -169,9 +219,9 @@ async function main() {
         const turn = await mcpClient.callTool('await_turn', {});
         const evt = JSON.parse(turn.content[0].text);
         console.error(`[llm-agent] Received turn:`, evt);
-        
+
         handleInboundEvent(evt);
-        
+
         // Wait for handling to finish before pulling next turn
         while (busy) {
           await new Promise(r => setTimeout(r, 50));
