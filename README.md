@@ -16,6 +16,32 @@ This client knows how to speak to respective LLM providers (Codex, Claude, Gemin
 - **Turn Polling**: Connects to the generic Orchestrator via WebSocket and continuously polls for work using the `await_turn` tool.
 - **Resilience**: Implements internal reconnect logic with exponential backoff. If the Orchestrator becomes unavailable, the client gracefully retries.
 
+## On-demand launch (`agent-launcher`)
+
+Instead of running `node llm-agent.mjs --agentId … --provider …` by hand for every agent, the
+`agent-launcher` HTTP service launches agents on demand. On `POST /agents` it creates and starts the
+agent in the orchestrator (via the orchestrator's existing HTTP API) and then spawns the `llm-agent`
+harness locally, which attaches over WebSocket exactly as a manual launch would. The orchestrator itself
+still launches nothing (the M05 attach-model invariant is preserved); the launcher is a separate process
+that must run on the host where the provider CLIs live.
+
+```bash
+npm run launcher     # starts on 127.0.0.1:4100
+```
+
+| Method | Path            | Body                                                      | Result                          |
+|--------|-----------------|-----------------------------------------------------------|---------------------------------|
+| POST   | `/agents`       | `{ provider, model?, executionMode?, agentId?, workdir? }`| `201 { agentId, pid, status }`  |
+| GET    | `/agents`       | —                                                         | `{ agents: [...] }`             |
+| DELETE | `/agents/:id`   | —                                                         | `{ agentId, terminated }`       |
+| GET    | `/healthz`      | —                                                         | `{ ok: true }`                  |
+
+Config via env: `AGENT_LAUNCHER_PORT` (default `4100`), `AGENTTALK_ORCHESTRATOR_URL`
+(default `http://localhost:3000`), `AGENTTALK_PERSISTENT_MCP_URL` (default `ws://localhost:3000/mcp`).
+
+> **Security:** the launcher spawns local processes. It binds `127.0.0.1` only and must not be exposed on
+> an external interface without an added auth layer.
+
 ## Contract Alignment & Hash Verification
 
 Because the Orchestrator and the Client share no common codebase, they communicate using a strictly enforced, byte-identical wire contract.
