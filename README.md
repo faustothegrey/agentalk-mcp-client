@@ -42,6 +42,36 @@ Config via env: `AGENT_LAUNCHER_PORT` (default `4100`), `AGENTTALK_ORCHESTRATOR_
 > **Security:** the launcher spawns local processes. It binds `127.0.0.1` only and must not be exposed on
 > an external interface without an added auth layer.
 
+## Bite 0 — autonomous capped run (`bite0-launcher`)
+
+The first rung of the autonomous-development ladder. A **deterministic, config-driven** runner (`lib/bite0-launcher.mjs`)
+that, with **no semantic inference**: starts the AgentTalk instance, launches the agent(s) the config declares (Bite 0:
+exactly one) via the on-demand launcher above, delivers the config `goal` as the worker's first turn, **enforces a
+machine-enforced cap** (wall-clock + resource meter — the anti-loop / anti-hang rail), and reports the outcome to the PO
+**only when the run is finished**. On cap breach the worker is terminated and the run is marked `FAILED (capped)`.
+
+> **Naming:** this deterministic runner is *the (AgentTalk) launcher*. **Hermes** is a separate, future *agent* layer
+> (it will invoke this launcher and monitor a live session) — not part of Bite 0.
+
+Config schema — see `bite0.config.example.json`:
+
+```jsonc
+{
+  "instance": { "startCommand": {…}, "orchestratorUrl": "…", "mcpUrl": "…", "recording": "…" },
+  "agents":   [ { "id": "worker-1", "provider": "claude", "role": "worker" } ],   // Bite 0: exactly one
+  "goal":     "the bounded task, delivered as the worker's first turn",
+  "cap":      { "wallClockMs": 600000, "pollIntervalMs": 5000,
+                "meter": { "url": "http://127.0.0.1:9899", "provider": "claude", "field": "session", "maxPercentDelta": 5 } }
+}
+```
+
+The PO expresses `{goal, team composition}` by writing this config; the launcher only *executes* it. The worker runs in a
+per-task git worktree (via the launcher's `workdir`) — its changes reach `master` only by a PO-gated merge.
+
+**Status:** the deterministic core + cap state-machine are unit-tested, and an E2E proves the core orchestrating the real
+on-demand launcher + a real spawned harness, including a real wall-clock cap terminating a real hung process. The
+production runner against a *live* AgentTalk instance + an authed provider CLI is the PO-babysat acceptance step.
+
 ## Contract Alignment & Hash Verification
 
 Because the Orchestrator and the Client share no common codebase, they communicate using a strictly enforced, byte-identical wire contract.

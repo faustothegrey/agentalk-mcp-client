@@ -1,0 +1,18 @@
+{
+  "instance": {
+    "startCommand": { "command": "npm", "args": ["run", "start"], "cwd": "../AgentTalk" },
+    "orchestratorUrl": "http://127.0.0.1:3000",
+    "mcpUrl": "ws://127.0.0.1:3000/mcp",
+    "readyPath": "/healthz",
+    "recording": "runs/bite0.ndjson"
+  },
+  "agents": [
+    { "id": "worker-1", "provider": "claude", "role": "worker" }
+  ],
+  "goal": "Make the one-line change described in the task and add its test; report done.",
+  "cap": {
+    "wallClockMs": 600000,
+    "pollIntervalMs": 5000,
+    "meter": { "url": "http://127.0.0.1:9899", "provider": "claude", "field": "session", "maxPercentDelta": 5 }
+  }
+}
