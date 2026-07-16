@@ -79,7 +79,9 @@ function wireDeps({ orchestratorUrl, mcp, llmAgentPath, report, reads }) {
   });
   return {
     startInstance: async () => ({ orchestratorUrl, mcpPort: mcp.port }),
-    launchAgent: async (agentCfg) => bl037.launchAgent({ provider: agentCfg.provider, executionMode: 'persistent', agentId: agentCfg.id }),
+    launchAgent: async (agentCfg) => bl037.launchAgent({
+      provider: agentCfg.provider, executionMode: 'persistent', agentId: agentCfg.id, workdir: agentCfg.workdir,
+    }),
     deliverGoal: async (_agentId, goal) => { if (reads.deliver) await mcp.deliverGoal(goal); },
     waitForOutcome: async () => mcp.outcome,
     terminateAgent: async (agentId) => bl037.terminateAgent(agentId),
@@ -128,7 +130,7 @@ describe('Bite 0 end-to-end', () => {
     const runner = createBite0Runner(deps);
     const outcome = await runner.run({
       instance: {},
-      agents: [{ id: 'worker-1', provider: 'gemini', role: 'worker' }],
+      agents: [{ id: 'worker-1', provider: 'gemini', role: 'worker', workdir: os.tmpdir() }],
       goal: 'do the trivial task',
       cap: { wallClockMs: 15000 },
     });
@@ -150,7 +152,7 @@ describe('Bite 0 end-to-end', () => {
     const runner = createBite0Runner(deps);
     const outcome = await runner.run({
       instance: {},
-      agents: [{ id: 'worker-1', provider: 'gemini', role: 'worker' }],
+      agents: [{ id: 'worker-1', provider: 'gemini', role: 'worker', workdir: os.tmpdir() }],
       goal: 'this will not be delivered',
       cap: { wallClockMs: 1500 },   // short real timeout
     });

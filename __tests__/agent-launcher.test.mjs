@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createLauncherCore, createLauncherServer, AgentLauncherError } from '../lib/agent-launcher.mjs';
 
+const WORKDIR = '/w';
+
 // ---- fakes -----------------------------------------------------------------
 
 function makeFakeChild(pid = 1234) {
@@ -39,6 +41,7 @@ const baseDeps = (overrides = {}) => ({
   llmAgentPath: '/abs/llm-agent.mjs',
   mcpUrl: 'ws://orch:3000/mcp',
   logger: { error: () => {} },
+  isDirectory: () => true,
   ...overrides,
 });
 
@@ -51,7 +54,7 @@ describe('launcher core', () => {
     const fetch = makeFakeFetch({ create: () => ({ ok: true, status: 200, json: async () => ({ id: 'a1' }) }) });
     const core = createLauncherCore(baseDeps({ spawn, fetch }));
 
-    const result = await core.launchAgent({ provider: 'claude', model: 'opus', executionMode: 'attach', agentId: 'a1', workdir: '/w' });
+    const result = await core.launchAgent({ workdir: WORKDIR, provider: 'claude', model: 'opus', executionMode: 'attach', agentId: 'a1' });
 
     expect(result).toEqual({ agentId: 'a1', pid: 4321, status: 'launched' });
     // orchestrator create then start, in order
@@ -62,7 +65,9 @@ describe('launcher core', () => {
     expect(cmd).toBe('node');
     expect(argv).toEqual(['/abs/llm-agent.mjs', '--agentId', 'a1', '--provider', 'claude', '--model', 'opus', '--execution-mode', 'attach']);
     expect(opts.env.AGENTTALK_PERSISTENT_MCP_URL).toBe('ws://orch:3000/mcp');
-    expect(opts.env.AGENTTALK_WORKDIR).toBe('/w');
+    expect(opts.env.AGENTTALK_WORKDIR).toBe(WORKDIR);
+    // BL-052: the explicit cwd is the containment — env alone let the worker inherit the launcher's.
+    expect(opts.cwd).toBe(WORKDIR);
     // tracked
     expect(core.listAgents()).toEqual([{ agentId: 'a1', pid: 4321, provider: 'claude', model: 'opus', alive: true }]);
   });
@@ -70,7 +75,7 @@ describe('launcher core', () => {
   it('uses the orchestrator-resolved id when no agentId is supplied', async () => {
     const fetch = makeFakeFetch({ create: () => ({ ok: true, status: 200, json: async () => ({ id: 'server-minted' }) }) });
     const core = createLauncherCore(baseDeps({ fetch }));
-    const result = await core.launchAgent({ provider: 'codex' });
+    const result = await core.launchAgent({ workdir: WORKDIR, provider: 'codex' });
     expect(result.agentId).toBe('server-minted');
     expect(fetch.calls[1].url).toBe('http://orch:3000/api/agents/server-minted/start');
   });
@@ -88,7 +93,7 @@ describe('launcher core', () => {
     const fetch = makeFakeFetch({ create: () => ({ ok: true, status: 200, json: async () => ({ id: 'a1' }) }) });
     const core = createLauncherCore(baseDeps({ spawn, fetch }));
 
-    await core.launchAgent({ provider: 'agy', agentId: 'a1' });
+    await core.launchAgent({ workdir: WORKDIR, provider: 'agy', agentId: 'a1' });
 
     // The orchestrator only records canonical providers (isUsageCaptureProvider);
     // 'agy' on the wire would be silently dropped, losing usage capture.
@@ -102,7 +107,37 @@ describe('launcher core', () => {
   it('rejects an unknown provider with 400 before any orchestrator call or spawn', async () => {
     const deps = baseDeps();
     const core = createLauncherCore(deps);
-    await expect(core.launchAgent({ provider: 'nope' })).rejects.toMatchObject({ statusCode: 400 });
+    await expect(core.launchAgent({ workdir: WORKDIR, provider: 'nope' })).rejects.toMatchObject({ statusCode: 400 });
+    expect(deps.fetch).not.toHaveBeenCalled();
+    expect(deps.spawn).not.toHaveBeenCalled();
+  });
+
+  // BL-052: a worker spawned with no cwd inherits the launcher's. During the BL-040 D4 run that was a
+  // real checkout and the worker committed into it. Each refusal below must land before the orchestrator
+  // create, so a rejected launch leaves no half-made agent record behind.
+  it('refuses a launch with no workdir, before any orchestrator call or spawn', async () => {
+    const deps = baseDeps();
+    const core = createLauncherCore(deps);
+    await expect(core.launchAgent({ provider: 'claude' })).rejects.toMatchObject({ statusCode: 400 });
+    expect(deps.fetch).not.toHaveBeenCalled();
+    expect(deps.spawn).not.toHaveBeenCalled();
+  });
+
+  it('refuses a relative workdir', async () => {
+    const deps = baseDeps();
+    const core = createLauncherCore(deps);
+    await expect(core.launchAgent({ provider: 'claude', workdir: 'scratch/here' }))
+      .rejects.toMatchObject({ statusCode: 400 });
+    expect(deps.fetch).not.toHaveBeenCalled();
+    expect(deps.spawn).not.toHaveBeenCalled();
+  });
+
+  it('refuses a workdir that does not exist and never creates it', async () => {
+    const deps = baseDeps({ isDirectory: vi.fn(() => false) });
+    const core = createLauncherCore(deps);
+    await expect(core.launchAgent({ provider: 'claude', workdir: '/nope/missing' }))
+      .rejects.toMatchObject({ statusCode: 400 });
+    expect(deps.isDirectory).toHaveBeenCalledWith('/nope/missing');
     expect(deps.fetch).not.toHaveBeenCalled();
     expect(deps.spawn).not.toHaveBeenCalled();
   });
@@ -110,29 +145,29 @@ describe('launcher core', () => {
   it('rejects a duplicate agentId with 409 and never spawns twice', async () => {
     const deps = baseDeps({ fetch: makeFakeFetch({ create: () => ({ ok: true, status: 200, json: async () => ({ id: 'dup' }) }) }) });
     const core = createLauncherCore(deps);
-    await core.launchAgent({ provider: 'claude', agentId: 'dup' });
-    await expect(core.launchAgent({ provider: 'claude', agentId: 'dup' })).rejects.toMatchObject({ statusCode: 409 });
+    await core.launchAgent({ workdir: WORKDIR, provider: 'claude', agentId: 'dup' });
+    await expect(core.launchAgent({ workdir: WORKDIR, provider: 'claude', agentId: 'dup' })).rejects.toMatchObject({ statusCode: 409 });
     expect(deps.spawn).toHaveBeenCalledTimes(1);
   });
 
   it('surfaces an orchestrator create failure as 502 and does not spawn', async () => {
     const deps = baseDeps({ fetch: makeFakeFetch({ create: () => ({ ok: false, status: 500, json: async () => ({}) }) }) });
     const core = createLauncherCore(deps);
-    await expect(core.launchAgent({ provider: 'claude' })).rejects.toMatchObject({ statusCode: 502 });
+    await expect(core.launchAgent({ workdir: WORKDIR, provider: 'claude' })).rejects.toMatchObject({ statusCode: 502 });
     expect(deps.spawn).not.toHaveBeenCalled();
   });
 
   it('surfaces an orchestrator start failure as 502 and does not spawn', async () => {
     const deps = baseDeps({ fetch: makeFakeFetch({ start: () => ({ ok: false, status: 503, json: async () => ({}) }) }) });
     const core = createLauncherCore(deps);
-    await expect(core.launchAgent({ provider: 'claude' })).rejects.toMatchObject({ statusCode: 502 });
+    await expect(core.launchAgent({ workdir: WORKDIR, provider: 'claude' })).rejects.toMatchObject({ statusCode: 502 });
     expect(deps.spawn).not.toHaveBeenCalled();
   });
 
   it('terminate kills the child and drops it from the table; unknown id is 404', async () => {
     const child = makeFakeChild(77);
     const core = createLauncherCore(baseDeps({ spawn: vi.fn(() => child) }));
-    await core.launchAgent({ provider: 'claude', agentId: 'k' });
+    await core.launchAgent({ workdir: WORKDIR, provider: 'claude', agentId: 'k' });
     expect(core.terminateAgent('k')).toEqual({ agentId: 'k', terminated: true });
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
     expect(core.listAgents()).toEqual([]);
@@ -142,7 +177,7 @@ describe('launcher core', () => {
   it('reaps a child from the table when it exits', async () => {
     const child = makeFakeChild(99);
     const core = createLauncherCore(baseDeps({ spawn: vi.fn(() => child) }));
-    await core.launchAgent({ provider: 'claude', agentId: 'e' });
+    await core.launchAgent({ workdir: WORKDIR, provider: 'claude', agentId: 'e' });
     expect(core.listAgents()).toHaveLength(1);
     child._fireExit(0, null);
     expect(core.listAgents()).toEqual([]);
