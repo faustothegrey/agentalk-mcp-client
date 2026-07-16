@@ -65,7 +65,6 @@ describe('agy HOME-level mcp_config', () => {
 
   it('points the executor HOME at the agent temp home and writes the config there', async () => {
     const saved = { ...process.env };
-    process.env.AGENTTALK_PERSISTENT_MCP = 'true';
     process.env.AGENTTALK_PERSISTENT_MCP_URL = 'ws://127.0.0.1:9999/mcp';
     process.env.AGENTTALK_AGENT_ID = 'wired-1';
     try {
