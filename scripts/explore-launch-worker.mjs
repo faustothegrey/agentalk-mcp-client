@@ -12,7 +12,10 @@
 // Kept in the tree (PO, 2026-07-16) after it served the BL-048 live validation; still needed for the
 // BL-040 D2/D4 babysat work, where `deliverGoal`/`waitForOutcome` are documented stubs.
 //
-// Usage: MCP_URL='ws://localhost:<dynamic-port>/' node scripts/explore-launch-worker.mjs
+// Usage: MCP_URL='ws://localhost:<dynamic-port>/' WORKER_WORKDIR=/tmp/att-worker-sandbox \
+//          node scripts/explore-launch-worker.mjs
+//   WORKER_WORKDIR is REQUIRED (BL-052) and must already exist — the launcher refuses rather than
+//   let the worker inherit this script's cwd. Make it a throwaway git repo, never a real checkout.
 //   MCP_URL is REQUIRED and the port is DYNAMIC — the orchestrator announces it on stdout
 //   ("MCP server URL set to: ...") AFTER "Ready to manage agents.", and it is not :3000/mcp.
 import { spawn } from 'node:child_process';
@@ -27,8 +30,15 @@ const orchestratorUrl = process.env.ORCH_URL || 'http://127.0.0.1:3000';
 const mcpUrl = process.env.MCP_URL;                       // REQUIRED (dynamic port)
 const provider = process.env.WORKER_PROVIDER || 'claude';
 const agentId = process.env.WORKER_ID || 'bite0-worker';
+const workdir = process.env.WORKER_WORKDIR;               // REQUIRED (BL-052)
 
 if (!mcpUrl) { console.error('set MCP_URL'); process.exit(2); }
+if (!workdir) {
+  // No default on purpose: this script runs from the client checkout, so a defaulted-to-cwd worker
+  // would be launched straight into a real repo — the BL-052 failure, verbatim.
+  console.error('set WORKER_WORKDIR to an existing absolute throwaway dir (BL-052)');
+  process.exit(2);
+}
 
 const core = createLauncherCore({
   spawn, fetch, orchestratorUrl,
@@ -36,7 +46,7 @@ const core = createLauncherCore({
   mcpUrl, logger: console,
 });
 
-const res = await core.launchAgent({ provider, executionMode: 'persistent', agentId });
+const res = await core.launchAgent({ provider, executionMode: 'persistent', agentId, workdir });
 console.log('LAUNCHED', JSON.stringify(res));
 console.log('[explore] worker launched; holding process alive (Ctrl-C / kill to stop).');
 setInterval(() => {}, 1 << 30);
