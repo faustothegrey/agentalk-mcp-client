@@ -219,6 +219,9 @@ describe('llm-agent exec-rpc via MCP', () => {
         cwd: process.cwd(),
         env: {
           ...process.env,
+          // As the launcher does in production: the agent works in its own workdir.
+          // Without it the bridge path writes its agy plugin into the repo root.
+          AGENTTALK_WORKDIR: tempDir,
           AGENTTALK_PERSISTENT_MCP: 'true',
           AGENTTALK_PERSISTENT_MCP_URL: `ws://localhost:${port}/?contractHash=hash-456`,
           AGENTTALK_PERSISTENT_COMMAND_JSON: JSON.stringify({
