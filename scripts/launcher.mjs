@@ -6,13 +6,17 @@
 //
 // This entrypoint exercises the LIVE path the E2E stubbed:
 //   D1  real instance-start — boots the orchestrator and parses its DYNAMIC MCP url from stdout
-//   D3  real cap            — a worker with no turn parks; the wall-clock cap terminates the real process
+//   D2/D4 real goal-delivery + outcome-detection — a worker-only team + a task through the product's
+//         own HTTP API, then the team's own status polled to termination
+//   D3  real cap            — the wall-clock cap terminates the real process
 //   D6  run artifact        — NDJSON via `config.instance.recording`
 //
-// DEFERRED to the PO-babysat run (documented, not faked):
-//   D2/D4  real goal-delivery + outcome-detection semantics against the live orchestrator, and a real
-//          authed-CLI worker turn. Here `deliverGoal` records intent and `waitForOutcome` never resolves,
-//          so the worker runs until the cap — exactly the D3 hung-worker probe.
+// Known limits of D4 as built (stated, not faked):
+//   - The worker's result TEXT is not reachable: tasks have no read endpoint, and completing deletes
+//     team.currentTaskId. `waitForOutcome` therefore returns the terminal TEAM state; the transcript
+//     lives in the NDJSON run artifact.
+//   - Terminal states are 'completed' | 'error' | 'interrupted' (the TeamStatus contract). Earlier
+//     notes claimed 'failed'/'awaiting_operator' — neither exists.
 
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -67,10 +71,28 @@ function makeStartInstance(logger) {
   });
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Every API call the launcher makes goes through here: a non-2xx from the orchestrator is a real
+// failure of the run and must surface as one, not as `undefined` flowing on to a confusing error
+// three steps later.
+async function fetchJson(url, init) {
+  const res = await fetch(url, init);
+  const text = await res.text();
+  if (!res.ok) throw new Error(`${init?.method ?? 'GET'} ${url} -> ${res.status}: ${text.slice(0, 200)}`);
+  try { return text ? JSON.parse(text) : null; }
+  catch { throw new Error(`${url} returned non-JSON: ${text.slice(0, 200)}`); }
+}
+
 function assembleDeps(config, logger) {
   const recorder = config.instance?.recording
     ? createNdjsonRecorder(path.resolve(clientRoot, config.instance.recording))
     : null;
+
+  // Reuse the cap's cadence for API polling — one knob, not two.
+  const pollMs = config.cap?.pollIntervalMs ?? 5000;
+  // Bounded because deliverGoal runs BEFORE the cap race starts (see deliverGoal).
+  const agentReadyTimeoutMs = config.agents?.[0]?.readyTimeoutMs ?? 60000;
 
   return {
     startInstance: makeStartInstance(logger),
@@ -94,13 +116,73 @@ function assembleDeps(config, logger) {
       });
     },
 
-    // DEFERRED (babysat D2/D4): record intent only. No turn is delivered, so the worker parks.
-    deliverGoal: async (agentId, goal) => {
-      logger.error?.(`[launcher] goal-delivery DEFERRED to babysat run (D2/D4) for ${agentId}: "${String(goal).slice(0, 60)}"`);
+    // D4: deliver the goal for real — a worker-only team + a task, through the product's own API.
+    deliverGoal: async (agentId, goal, instance) => {
+      // The agent must be READY before it can join a team (the orchestrator rejects the create
+      // outright: "Agent <id> must be ready before joining a team"). launchAgent only returns once
+      // the process is spawned; 'ready' arrives later, when the worker's MCP client connects.
+      //
+      // This wait is BOUNDED on purpose. The cap race (step 4 of the runner) starts only AFTER
+      // deliverGoal resolves, so an unbounded wait here would hang outside the anti-hang rail —
+      // exactly the failure Bite 0 exists to prevent. Fail fast instead and let the run report it.
+      const readyTimeoutMs = agentReadyTimeoutMs;
+      const deadline = Date.now() + readyTimeoutMs;
+      let status = null;
+      while (Date.now() < deadline) {
+        const agents = await fetchJson(`${instance.orchestratorUrl}/api/agents`);
+        status = agents.find((a) => a.id === agentId)?.status ?? null;
+        if (status === 'ready') break;
+        if (status === 'error' || status === 'terminated') {
+          throw new Error(`agent ${agentId} reached '${status}' before it could join a team`);
+        }
+        await sleep(pollMs);
+      }
+      if (status !== 'ready') {
+        throw new Error(`agent ${agentId} not ready within ${readyTimeoutMs}ms (last status: ${status ?? 'unknown'})`);
+      }
+
+      const team = await fetchJson(`${instance.orchestratorUrl}/api/teams`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ members: [{ agentId, role: 'worker' }] }),
+      });
+      if (!team?.id) throw new Error(`team creation failed: ${JSON.stringify(team)}`);
+      instance._teamId = team.id;
+      logger.error?.(`[launcher] team ${team.id} created (worker-only, ${agentId})`);
+
+      const task = await fetchJson(`${instance.orchestratorUrl}/api/teams/${team.id}/task`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description: goal }),
+      });
+      logger.error?.(`[launcher] task assigned to team ${team.id}${task?.id ? ` (task ${task.id})` : ''}`);
     },
 
-    // DEFERRED (babysat D4): outcome-detection. Never resolves → worker runs until the cap (D3 probe).
-    waitForOutcome: () => new Promise(() => {}),
+    // D4: detect the outcome by polling the team's own status through the product API.
+    // Terminal states come from the TeamStatus contract — 'completed' | 'error' | 'interrupted'.
+    // (Earlier notes claimed 'failed'/'awaiting_operator'; neither exists. Verified against
+    // packages/contracts/src/types.ts.) Resolving means completed; throwing is reported by the
+    // runner as 'worker-error'.
+    waitForOutcome: async (agentId, instance) => {
+      const teamId = instance._teamId;
+      if (!teamId) throw new Error('waitForOutcome: no team was created for this run');
+      // No deadline here by design: the runner races this against the cap, which IS the time bound.
+      for (;;) {
+        const teams = await fetchJson(`${instance.orchestratorUrl}/api/teams`);
+        const team = teams.find((t) => t.id === teamId);
+        if (!team) throw new Error(`team ${teamId} vanished from the orchestrator`);
+        if (team.status === 'completed') {
+          // The worker's actual result TEXT is not reachable through the API: tasks have no read
+          // endpoint, and completing deletes team.currentTaskId. What is observable is the terminal
+          // team state — the run artifact (NDJSON) carries the transcript.
+          return { result: { teamId, status: team.status, taskId: team.currentTaskId ?? null } };
+        }
+        if (team.status === 'error' || team.status === 'interrupted') {
+          throw new Error(`team ${teamId} ended in '${team.status}'`);
+        }
+        await sleep(pollMs);
+      }
+    },
 
     terminateAgent: async (agentId, instance) => {
       try { instance._bl037?.terminateAgent(agentId); }
