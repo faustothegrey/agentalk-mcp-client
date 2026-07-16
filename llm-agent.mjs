@@ -99,43 +99,53 @@ const {
 
 function handleExecRpc(evt) {
   busy = true;
-  // BL-053: `process.cwd()` is our assigned workdir — we chdir'd into it at startup.
-  const taskDir = provisionTaskDir(evt.cwd, process.cwd());
-  if (taskDir) console.log(`[llm-agent] task worktree: ${taskDir}`);
-  executor.executeTurn({
-    id: `exec-${Date.now()}`,
-    prompt: evt.prompt,
-    onStderrChunk: (chunk) => process.stderr.write(chunk),
-  }, {
-    onReplyChunk: () => {},
-    cwd: taskDir,
-    timeoutMs: evt.timeoutMs,
-  }).then(async (result) => {
-    try {
-      await mcpClient.callTool('submit_exec_result', {
-        text: result.response,
-        usage: {
-          prompt_tokens: result.tokenDetails?.input || 0,
-          completion_tokens: result.tokenDetails?.output || 0
-        }
+  // BL-061: provisioning runs INSIDE the chain so that a failure to provide the task dir the
+  // orchestrator asked for travels the same road as any other turn failure — reported back via
+  // submit_exec_result, with `busy` released. Called outside it, a throw would escape the event
+  // handler: the agent would die with `busy` stuck true and the orchestrator would learn nothing.
+  // A fail-closed guard that fails as a crash is not an improvement on a silent degrade.
+  Promise.resolve()
+    .then(() => {
+      // BL-053: `process.cwd()` is our assigned workdir — we chdir'd into it at startup.
+      const taskDir = provisionTaskDir(evt.cwd, process.cwd());
+      if (taskDir) console.log(`[llm-agent] task worktree: ${taskDir}`);
+      return executor.executeTurn({
+        id: `exec-${Date.now()}`,
+        prompt: evt.prompt,
+        onStderrChunk: (chunk) => process.stderr.write(chunk),
+      }, {
+        onReplyChunk: () => {},
+        cwd: taskDir,
+        timeoutMs: evt.timeoutMs,
       });
-    } catch (err) {
-      console.error(`[llm-agent] Failed to submit exec result:`, err);
-    } finally {
-      busy = false;
-    }
-  }).catch(async (err) => {
-    console.error(`[llm-agent] exec_rpc failed:`, err);
-    try {
-      await mcpClient.callTool('submit_exec_result', {
-        text: `ERROR: ${err.message}`,
-      });
-    } catch (submitErr) {
-      console.error(`[llm-agent] Failed to submit exec error:`, submitErr);
-    } finally {
-      busy = false;
-    }
-  });
+    })
+    .then(async (result) => {
+      try {
+        await mcpClient.callTool('submit_exec_result', {
+          text: result.response,
+          usage: {
+            prompt_tokens: result.tokenDetails?.input || 0,
+            completion_tokens: result.tokenDetails?.output || 0
+          }
+        });
+      } catch (err) {
+        console.error(`[llm-agent] Failed to submit exec result:`, err);
+      } finally {
+        busy = false;
+      }
+    })
+    .catch(async (err) => {
+      console.error(`[llm-agent] exec_rpc failed:`, err);
+      try {
+        await mcpClient.callTool('submit_exec_result', {
+          text: `ERROR: ${err.message}`,
+        });
+      } catch (submitErr) {
+        console.error(`[llm-agent] Failed to submit exec error:`, submitErr);
+      } finally {
+        busy = false;
+      }
+    });
 }
 
 function handleHealthcheck(evt) {
