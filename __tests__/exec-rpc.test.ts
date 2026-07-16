@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
@@ -12,16 +12,19 @@ function createMockMcpServer(): Promise<{
   port: number;
   awaitConnection: () => Promise<WebSocket>;
   initializeRequests: any[];
+  connectionUrls: string[];
 }> {
   return new Promise((resolve) => {
     const wss = new WebSocketServer({ port: 0 });
     const initializeRequests: any[] = [];
+    const connectionUrls: string[] = [];
 
     wss.on('listening', () => {
       const port = (wss.address() as any).port;
       
       const awaitConnection = () => new Promise<WebSocket>((resolveConn) => {
-        wss.once('connection', (ws) => {
+        wss.once('connection', (ws, req) => {
+          connectionUrls.push(req.url || '');
           ws.on('message', (data) => {
             const msg = JSON.parse(data.toString());
             // auto-reply to initialize
@@ -38,7 +41,7 @@ function createMockMcpServer(): Promise<{
         });
       });
       
-      resolve({ wss, port, awaitConnection, initializeRequests });
+      resolve({ wss, port, awaitConnection, initializeRequests, connectionUrls });
     });
   });
 }
@@ -144,5 +147,96 @@ describe('llm-agent exec-rpc via MCP', () => {
       text: 'mocked reply',
       usage: { prompt_tokens: 10, completion_tokens: 20 }
     });
+  });
+
+  it('appends agentId with & when the MCP URL already has a query string', async () => {
+    const { wss, port, awaitConnection, connectionUrls } = await createMockMcpServer();
+    currentServer = wss;
+
+    const tempDir = mkdtempSync(path.join(os.tmpdir(), 'agenttalk-llm-agent-url-test-'));
+    tempDirs.push(tempDir);
+
+    const fakeBridgePath = path.join(tempDir, 'fake-persistent-bridge.js');
+    writeFileSync(fakeBridgePath, [
+      "const readline = require('readline');",
+      "const rl = readline.createInterface({ input: process.stdin, output: process.stdout });",
+      "rl.on('line', () => {",
+      "  console.log(JSON.stringify({ type: 'result', result: 'ok', usage: { input_tokens: 1, output_tokens: 1 } }));",
+      "});"
+    ].join('\n'), 'utf8');
+
+    const agentScriptPath = path.resolve(process.cwd(), 'llm-agent.mjs');
+    childProcess = spawn(
+      process.execPath,
+      [agentScriptPath, '--provider', 'gemini', '--execution-mode', 'persistent', '--agentId', 'test agent'],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          AGENTTALK_PERSISTENT_MCP_URL: `ws://localhost:${port}/?contractHash=hash-123`,
+          AGENTTALK_PERSISTENT_COMMAND_JSON: JSON.stringify({
+            command: process.execPath,
+            args: [fakeBridgePath],
+          }),
+        },
+        stdio: 'ignore',
+      },
+    );
+
+    const ws = await awaitConnection();
+
+    await sendMcpTurn(ws, {
+      type: 'exec_rpc',
+      prompt: 'hello world',
+    });
+
+    expect(connectionUrls).toEqual(['/?contractHash=hash-123&agentId=test%20agent']);
+  });
+
+  it('propagates the CLI agentId into nested persistent MCP bridge URLs', async () => {
+    const { wss, port, awaitConnection } = await createMockMcpServer();
+    currentServer = wss;
+
+    const tempDir = mkdtempSync(path.join(os.tmpdir(), 'agenttalk-llm-agent-nested-url-test-'));
+    tempDirs.push(tempDir);
+
+    const fakeAgyPath = path.join(tempDir, 'fake-agy.js');
+    writeFileSync(fakeAgyPath, [
+      '#!/usr/bin/env node',
+      "const fs = require('fs');",
+      "const path = require('path');",
+      "const settingsPath = path.join(process.env.GEMINI_CLI_HOME, '.gemini', 'settings.json');",
+      "const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));",
+      "console.log(settings.mcpServers.bridge.args[1]);"
+    ].join('\n'), 'utf8');
+    chmodSync(fakeAgyPath, 0o755);
+
+    const agentScriptPath = path.resolve(process.cwd(), 'llm-agent.mjs');
+    childProcess = spawn(
+      process.execPath,
+      [agentScriptPath, '--provider', 'gemini', '--execution-mode', 'persistent', '--agentId', 'nested agent'],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          AGENTTALK_PERSISTENT_MCP: 'true',
+          AGENTTALK_PERSISTENT_MCP_URL: `ws://localhost:${port}/?contractHash=hash-456`,
+          AGENTTALK_PERSISTENT_COMMAND_JSON: JSON.stringify({
+            command: fakeAgyPath,
+          }),
+        },
+        stdio: 'ignore',
+      },
+    );
+
+    const ws = await awaitConnection();
+
+    const toolCall = await sendMcpTurn(ws, {
+      type: 'exec_rpc',
+      prompt: 'inspect nested bridge url',
+    });
+
+    expect(toolCall.params.name).toBe('submit_exec_result');
+    expect(toolCall.params.arguments.text.trim()).toBe(`ws://localhost:${port}/?contractHash=hash-456&agentId=nested%20agent`);
   });
 });
