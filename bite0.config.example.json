@@ -7,7 +7,7 @@
     "recording": "runs/bite0.ndjson"
   },
   "agents": [
-    { "id": "worker-1", "provider": "claude", "role": "worker" }
+    { "id": "worker-1", "provider": "claude", "role": "worker", "workdir": "/tmp/att-worker-sandbox" }
   ],
   "goal": "Make the one-line change described in the task and add its test; report done.",
   "cap": {

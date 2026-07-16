@@ -126,11 +126,23 @@ describe('agent-launcher end-to-end', () => {
     // safety net: kill any launched child even if an assertion throws
     cleanups.push(() => core.listAgents().forEach((a) => { try { process.kill(a.pid, 'SIGKILL'); } catch { /* gone */ } }));
 
+    // BL-052 over the wire: the HTTP surface refuses a workdir-less launch rather than letting the
+    // spawned worker inherit the launcher's cwd. Asserted before the happy path so a regression here
+    // cannot hide behind a passing launch.
+    const refused = await fetch(`${launcherUrl}/agents`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'gemini', executionMode: 'persistent', agentId: 'no-workdir' }),
+    });
+    expect(refused.status).toBe(400);
+    expect(core.listAgents()).toEqual([]);          // nothing spawned, nothing tracked
+    expect(orch.calls).toEqual([]);                 // and the orchestrator was never touched
+
     // 5. drive it: one real HTTP call launches the agent
     const res = await fetch(`${launcherUrl}/agents`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ provider: 'gemini', executionMode: 'persistent', agentId: 'e2e-1' }),
+      body: JSON.stringify({ provider: 'gemini', executionMode: 'persistent', agentId: 'e2e-1', workdir: os.tmpdir() }),
     });
     const launched = await res.json();
 

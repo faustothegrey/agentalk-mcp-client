@@ -6,7 +6,7 @@
     "recording": "runs/bl040-d1d3.ndjson"
   },
   "agents": [
-    { "id": "bite0-worker", "provider": "gemini", "executionMode": "persistent" }
+    { "id": "bite0-worker", "provider": "gemini", "executionMode": "persistent", "workdir": "/tmp/att-worker-sandbox" }
   ],
   "goal": "(D1/D3 slice — no goal delivered; worker parks until the cap)",
   "cap": {
