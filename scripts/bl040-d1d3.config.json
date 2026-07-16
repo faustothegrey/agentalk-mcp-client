@@ -1,0 +1,17 @@
+{
+  "instance": {
+    "startCommand": { "command": "node", "args": ["apps/orchestrator/dist/index.js"], "cwd": "../../AgentTalk" },
+    "orchestratorUrl": "http://127.0.0.1:3000",
+    "readyTimeoutMs": 60000,
+    "recording": "runs/bl040-d1d3.ndjson"
+  },
+  "agents": [
+    { "id": "bite0-worker", "provider": "gemini", "executionMode": "persistent" }
+  ],
+  "goal": "(D1/D3 slice — no goal delivered; worker parks until the cap)",
+  "cap": {
+    "wallClockMs": 12000,
+    "pollIntervalMs": 5000,
+    "meter": { "url": "http://127.0.0.1:9899", "provider": "claude", "field": "session", "maxPercentDelta": 50 }
+  }
+}
