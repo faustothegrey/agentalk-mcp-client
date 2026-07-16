@@ -1,2 +1,5 @@
 node_modules/
 .DS_Store
+
+# Bite 0 launcher run artifacts (NDJSON recordings + run logs)
+runs/
