@@ -3,3 +3,6 @@ node_modules/
 
 # Bite 0 launcher run artifacts (NDJSON recordings + run logs)
 runs/
+
+# Claude Code per-user local settings (not shared)
+.claude/settings.local.json
