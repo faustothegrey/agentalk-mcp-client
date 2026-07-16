@@ -83,6 +83,30 @@ describe('launcher core', () => {
     expect(deps.spawn).not.toHaveBeenCalled();
   });
 
+  it('resolves a provider alias before the orchestrator ever sees it', async () => {
+    const spawn = vi.fn(() => makeFakeChild(77));
+    const fetch = makeFakeFetch({ create: () => ({ ok: true, status: 200, json: async () => ({ id: 'a1' }) }) });
+    const core = createLauncherCore(baseDeps({ spawn, fetch }));
+
+    await core.launchAgent({ provider: 'agy', agentId: 'a1' });
+
+    // The orchestrator only records canonical providers (isUsageCaptureProvider);
+    // 'agy' on the wire would be silently dropped, losing usage capture.
+    expect(JSON.parse(fetch.calls[0].opts.body).provider).toBe('gemini');
+    expect(JSON.parse(fetch.calls[1].opts.body).provider).toBe('gemini');
+    expect(spawn.mock.calls[0][1]).toContain('gemini');
+    expect(spawn.mock.calls[0][1]).not.toContain('agy');
+    expect(core.listAgents()[0].provider).toBe('gemini');
+  });
+
+  it('rejects an unknown provider with 400 before any orchestrator call or spawn', async () => {
+    const deps = baseDeps();
+    const core = createLauncherCore(deps);
+    await expect(core.launchAgent({ provider: 'nope' })).rejects.toMatchObject({ statusCode: 400 });
+    expect(deps.fetch).not.toHaveBeenCalled();
+    expect(deps.spawn).not.toHaveBeenCalled();
+  });
+
   it('rejects a duplicate agentId with 409 and never spawns twice', async () => {
     const deps = baseDeps({ fetch: makeFakeFetch({ create: () => ({ ok: true, status: 200, json: async () => ({ id: 'dup' }) }) }) });
     const core = createLauncherCore(deps);
