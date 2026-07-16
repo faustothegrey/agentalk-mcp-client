@@ -3,6 +3,7 @@
 // Speaks the [AgentTalk]: protocol and routes messages to a selected LLM CLI.
 
 import path from 'path';
+import { provisionTaskDir } from './lib/task-worktree.mjs';
 import { createRequestIdGenerator } from './lib/request-id.mjs';
 import { createExecutor, normalizeRequestedExecutionMode } from './lib/executor-runtime.mjs';
 import { McpClient } from './lib/mcp-client.mjs';
@@ -98,13 +99,16 @@ const {
 
 function handleExecRpc(evt) {
   busy = true;
+  // BL-053: `process.cwd()` is our assigned workdir — we chdir'd into it at startup.
+  const taskDir = provisionTaskDir(evt.cwd, process.cwd());
+  if (taskDir) console.log(`[llm-agent] task worktree: ${taskDir}`);
   executor.executeTurn({
     id: `exec-${Date.now()}`,
     prompt: evt.prompt,
     onStderrChunk: (chunk) => process.stderr.write(chunk),
   }, {
     onReplyChunk: () => {},
-    cwd: evt.cwd,
+    cwd: taskDir,
     timeoutMs: evt.timeoutMs,
   }).then(async (result) => {
     try {
