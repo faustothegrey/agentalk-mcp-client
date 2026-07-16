@@ -244,4 +244,78 @@ describe('llm-agent exec-rpc via MCP', () => {
     expect(toolCall.params.name).toBe('submit_exec_result');
     expect(toolCall.params.arguments.text.trim()).toBe(`ws://localhost:${port}/?contractHash=hash-456&agentId=nested%20agent`);
   });
+
+  // BL-061. The unit tests prove provisionTaskDir throws; this proves the throw REACHES THE
+  // ORCHESTRATOR instead of killing the agent. That is the whole claim of "fail loudly", and it
+  // is the half that a synchronous call outside the promise chain would silently get wrong: the
+  // agent would die with `busy` stuck true and the orchestrator would wait on a corpse.
+  it('reports a failure to provision the task worktree back to the orchestrator', async () => {
+    const { port, awaitConnection } = await createMockMcpServer();
+    const tempDir = mkdtempSync(path.join(os.tmpdir(), 'bl061-notarepo-'));
+    tempDirs.push(tempDir);
+
+    // The workdir is deliberately NOT a git repo, so a requested task worktree cannot be
+    // provisioned. The provider replies with a marker: seeing it proves a turn actually reached
+    // the provider, and NOT seeing it proves the turn failed before execution.
+    //
+    // Vehicle is 'claude' because it is the one provider whose command override keeps its args
+    // (gemini's per-turn spawn hardcodes agy's own flags and drops baseCmd.args, so a fake
+    // script path never survives). The property under test is provider-agnostic.
+    const fakeBridgePath = path.join(tempDir, 'fake-persistent-bridge.js');
+    writeFileSync(fakeBridgePath, [
+      "const readline = require('readline');",
+      "const rl = readline.createInterface({ input: process.stdin, output: process.stdout });",
+      "rl.on('line', () => {",
+      "  console.log(JSON.stringify({ type: 'result', result: 'PROVIDER RAN', usage: { input_tokens: 0, output_tokens: 0 } }));",
+      "});",
+    ].join('\n'), 'utf8');
+
+    const agentScriptPath = path.resolve(process.cwd(), 'llm-agent.mjs');
+    childProcess = spawn(
+      process.execPath,
+      [agentScriptPath, '--provider', 'claude', '--execution-mode', 'persistent', '--agentId', 'bl061-agent'],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          AGENTTALK_WORKDIR: tempDir,
+          AGENTTALK_PERSISTENT_MCP_URL: `ws://localhost:${port}/`,
+          AGENTTALK_PERSISTENT_COMMAND_JSON: JSON.stringify({
+            command: process.execPath,
+            args: [fakeBridgePath],
+          }),
+        },
+        stdio: 'ignore',
+      },
+    );
+
+    const ws = await awaitConnection();
+    const toolCall = await sendMcpTurn(ws, {
+      type: 'exec_rpc',
+      prompt: 'do the work',
+      cwd: 'agentalk-task-task-61',
+    });
+
+    // Loud: the orchestrator is told, in the same channel as any other turn failure...
+    expect(toolCall.params.name).toBe('submit_exec_result');
+    expect(toolCall.params.arguments.text).toMatch(/^ERROR:/);
+    // ...and the message says WHY, in git's own words -- not just "something went wrong".
+    expect(toolCall.params.arguments.text).toMatch(/could not provision task worktree/i);
+    expect(toolCall.params.arguments.text).toMatch(/not a git repository/i);
+    // Closed, not merely noisy: the turn never ran anywhere. A degrade would have executed it at
+    // the workdir root and reported success -- exactly the silence BL-061 exists to remove.
+    expect(toolCall.params.arguments.text).not.toMatch(/PROVIDER RAN/);
+
+    // And the agent SURVIVED it: a failure that kills the worker (or leaves `busy` stuck true)
+    // would leave the orchestrator waiting on a corpse, which is worse than the degrade we
+    // replaced. A second turn -- carrying no task dir, the legitimate planner-shaped case --
+    // must still be served normally.
+    const secondCall = await sendMcpTurn(ws, {
+      type: 'exec_rpc',
+      prompt: 'do more work',
+    });
+    expect(secondCall.params.name).toBe('submit_exec_result');
+    expect(secondCall.params.arguments.text).toMatch(/PROVIDER RAN/);
+    expect(secondCall.params.arguments.text).not.toMatch(/^ERROR:/);
+  });
 });

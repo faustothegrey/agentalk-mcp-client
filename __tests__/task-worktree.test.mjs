@@ -65,24 +65,30 @@ describe('provisionTaskDir (BL-053 containment)', () => {
     expect(taskDir.startsWith(workdir)).toBe(true);
   });
 
-  it('refuses a name that is pure traversal, rather than provisioning anything', () => {
+  // BL-061: fail closed. A task dir that was ASKED FOR and cannot be provided is a thrown error,
+  // never a quiet substitution of the workdir root. BL-053 removed the prompt clause that asked
+  // the agent to police this; these are what replaced it, and they are the reason that removal
+  // was honest rather than merely convenient.
+  it('throws on a name that is pure traversal, rather than provisioning anything', () => {
     const workdir = makeRepo();
-    const logged = [];
 
-    expect(provisionTaskDir('..', workdir, { log: (m) => logged.push(m) })).toBeUndefined();
-    expect(logged.join(' ')).toMatch(/refusing/i);
+    expect(() => provisionTaskDir('..', workdir)).toThrow(/refusing to provision/i);
   });
 
-  it('falls back to the workdir root -- loudly -- when it is not a git repo', () => {
+  it('throws -- rather than silently using the workdir root -- when the workdir is not a git repo', () => {
     const notARepo = mkdtempSync(path.join(tmpdir(), 'task-worktree-bare-'));
     dirs.push(notARepo);
-    const logged = [];
 
-    const taskDir = provisionTaskDir('agentalk-task-task-9', notARepo, { log: (m) => logged.push(m) });
+    expect(() => provisionTaskDir('agentalk-task-task-9', notARepo))
+      .toThrow(/could not provision task worktree/i);
+  });
 
-    // Contained, degraded, and explained -- never silently swallowed.
-    expect(taskDir).toBeUndefined();
-    expect(logged.join(' ')).toMatch(/could not provision|no per-task isolation/i);
+  it("carries git's own words into the failure, so the cause is readable", () => {
+    const notARepo = mkdtempSync(path.join(tmpdir(), 'task-worktree-bare-'));
+    dirs.push(notARepo);
+
+    // A loud failure that cannot say WHY is just a quieter one.
+    expect(() => provisionTaskDir('agentalk-task-task-9', notARepo)).toThrow(/not a git repository/i);
   });
 
   it('reuses an existing task dir instead of failing the turn', () => {
@@ -94,7 +100,23 @@ describe('provisionTaskDir (BL-053 containment)', () => {
     expect(second).toBe(first);
   });
 
-  it('does nothing when the orchestrator sends no task dir', () => {
-    expect(provisionTaskDir(undefined, makeRepo())).toBeUndefined();
+  // BL-061: the other half of fail-closed, and the easier one to break. "No task dir asked for"
+  // is NOT a failure -- planner-style turns (non-maintainsSession completers) legitimately carry
+  // none and must keep running at the workdir root. Only "asked for and unavailable" is fatal.
+  // Tightening the guard until this throws too would break every planner turn.
+  it('returns undefined -- and does NOT throw -- when no task dir was asked for', () => {
+    const workdir = makeRepo();
+
+    expect(provisionTaskDir(undefined, workdir)).toBeUndefined();
+    expect(() => provisionTaskDir(undefined, workdir)).not.toThrow();
+  });
+
+  it('does not throw for a missing task dir even when the workdir is not a git repo', () => {
+    // The no-name path must never touch git at all: nothing was asked for, nothing can fail.
+    const notARepo = mkdtempSync(path.join(tmpdir(), 'task-worktree-bare-'));
+    dirs.push(notARepo);
+
+    expect(provisionTaskDir(undefined, notARepo)).toBeUndefined();
+    expect(provisionTaskDir('', notARepo)).toBeUndefined();
   });
 });
