@@ -104,7 +104,10 @@ describe('llm-agent exec-rpc via MCP', () => {
     const tempDir = mkdtempSync(path.join(os.tmpdir(), 'agenttalk-llm-agent-test-'));
     tempDirs.push(tempDir);
     
-    // We use a fake persistent bridge that just echoes
+    // We use a fake persistent bridge that just echoes.
+    // Provider is 'claude': this exercises the long-lived stdio session, which after
+    // BL-057 only claude has (agy is spawned per turn -- see the nested-bridge test
+    // below for gemini's path).
     const fakeBridgePath = path.join(tempDir, 'fake-persistent-bridge.js');
     writeFileSync(fakeBridgePath, [
       "const readline = require('readline');",
@@ -117,7 +120,7 @@ describe('llm-agent exec-rpc via MCP', () => {
     const agentScriptPath = path.resolve(process.cwd(), 'llm-agent.mjs');
     childProcess = spawn(
       process.execPath,
-      [agentScriptPath, '--provider', 'gemini', '--execution-mode', 'persistent', '--agentId', 'test-123'],
+      [agentScriptPath, '--provider', 'claude', '--execution-mode', 'persistent', '--agentId', 'test-123'],
       {
         cwd: process.cwd(),
         env: {
@@ -222,7 +225,6 @@ describe('llm-agent exec-rpc via MCP', () => {
           // As the launcher does in production: the agent works in its own workdir.
           // Without it the bridge path writes its agy plugin into the repo root.
           AGENTTALK_WORKDIR: tempDir,
-          AGENTTALK_PERSISTENT_MCP: 'true',
           AGENTTALK_PERSISTENT_MCP_URL: `ws://localhost:${port}/?contractHash=hash-456`,
           AGENTTALK_PERSISTENT_COMMAND_JSON: JSON.stringify({
             command: fakeAgyPath,
