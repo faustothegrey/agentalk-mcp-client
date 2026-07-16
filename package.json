@@ -3,10 +3,12 @@
   "version": "1.0.0",
   "description": "AgentTalk MCP attach-mode worker (harness + llm-agent + pty drivers)",
   "bin": {
-    "llm-agent": "./llm-agent.mjs"
+    "llm-agent": "./llm-agent.mjs",
+    "agent-launcher": "./agent-launcher.mjs"
   },
   "scripts": {
     "lint": "eslint .",
+    "launcher": "node agent-launcher.mjs",
     "test": "vitest run",
     "verify-contract": "node scripts/verify-contract.js",
     "sync-contract": "node scripts/sync-wire-contract.js",
