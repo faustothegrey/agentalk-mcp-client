@@ -1,22 +1,48 @@
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { createExecutor } from '../lib/executor-runtime.mjs';
 
 // Rails for BL-045: an attached provider CLI that accepts stdin but never speaks
-// the expected protocol back (agy drops into an interactive UI on an unrecognised
-// subcommand) used to hang a turn forever. These pin the failure as bounded+loud.
+// the expected protocol back used to hang a turn forever. These pin the failure as
+// bounded+loud.
+//
+// The vehicle is 'claude' because it is the only provider that still holds a
+// long-lived stdio session (BasePersistentExecutor), which is the machinery these
+// rails guard. It was 'gemini' until BL-057: agy is now spawned per turn, so a
+// stdio session that never answers is no longer reachable on that path at all --
+// gemini's turn timeout is the spawn-side one covered by the launcher suite.
 //
 // A command override stands in for the real CLI so the rails are tested without
 // depending on a provider binary or its auth.
 const persistent = (args) =>
   createExecutor({
-    providerName: 'gemini',
+    providerName: 'claude',
     selectedModel: null,
     requestedExecutionMode: 'auto',
     persistentCommandOverride: { command: process.execPath, args, env: process.env },
   }).executor;
 
+// The fakes are script *files*, not `node -e` one-liners: the claude executor
+// appends `--mcp-config <path> --strict-mcp-config` to the override's args, and
+// node only forwards trailing args to a script. Under `-e` it would parse them as
+// node options and exit before the fake ever ran.
+const fixtureDir = mkdtempSync(join(tmpdir(), 'executor-hardening-'));
+const fakeCli = (name, body) => {
+  const scriptPath = join(fixtureDir, name);
+  writeFileSync(scriptPath, body, 'utf8');
+  return [scriptPath];
+};
+
 // Alive, reads stdin, never answers -- the exact agy shape.
-const SILENT_BUT_ALIVE = ['-e', 'process.stdin.resume(); setInterval(() => {}, 1000);'];
+const SILENT_BUT_ALIVE = fakeCli('silent-but-alive.js', 'process.stdin.resume(); setInterval(() => {}, 1000);');
+// Dies on startup, so a later turn meets an already-dead child.
+const EXITS_WITH_3 = fakeCli('exits-with-3.js', 'process.exit(3);');
+
+afterAll(() => {
+  rmSync(fixtureDir, { recursive: true, force: true });
+});
 
 describe('persistent executor hardening', () => {
   it('rejects a turn whose session is alive but never responds', async () => {
@@ -55,7 +81,7 @@ describe('persistent executor hardening', () => {
   });
 
   it('fails a turn loudly when the session died earlier, instead of waiting on a dead child', async () => {
-    const executor = persistent(['-e', 'process.exit(3);']);
+    const executor = persistent(EXITS_WITH_3);
     await executor.initialize();
     // Let the child exit; no request is in flight, so nothing is pending to reject.
     await new Promise((r) => setTimeout(r, 250));
