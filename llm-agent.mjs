@@ -8,6 +8,7 @@ import { createRequestIdGenerator } from './lib/request-id.mjs';
 import { createExecutor, normalizeRequestedExecutionMode } from './lib/executor-runtime.mjs';
 import { McpClient } from './lib/mcp-client.mjs';
 import { getProviderLimit, resolveProvider } from './lib/provider-runtime.mjs';
+import { createResponseRecorder } from './lib/response-log.mjs';
 
 function parseArgs(argv) {
   const providerIndex = argv.indexOf('--provider');
@@ -65,6 +66,9 @@ if (agentId) {
   process.env.AGENTTALK_AGENT_ID = agentId;
 }
 
+// BL-064: the run's report sink, handed down by the launcher (AGENTTALK_RESPONSE_LOG).
+const recordResponse = createResponseRecorder(process.env);
+
 const provider = resolveProvider(providerName.toLowerCase());
 const limit = getProviderLimit(provider, selectedModel);
 const requestedWorkingDirectory = process.env.AGENTTALK_WORKDIR;
@@ -121,6 +125,19 @@ function handleExecRpc(evt) {
     })
     .then(async (result) => {
       try {
+        // BL-064: file the report BEFORE it crosses MCP. This text is the only place the worker's
+        // reasoning exists — the recording holds lifecycle only, and stdio:'inherit' puts the rest
+        // in a terminal nobody can read back. Best-effort by construction: a run must never fail
+        // because its observability did (recordResponse swallows its own errors).
+        recordResponse({
+          event: 'agent-response',
+          agentId,
+          text: result.response,
+          usage: {
+            prompt_tokens: result.tokenDetails?.input || 0,
+            completion_tokens: result.tokenDetails?.output || 0,
+          },
+        });
         await mcpClient.callTool('submit_exec_result', {
           text: result.response,
           usage: {

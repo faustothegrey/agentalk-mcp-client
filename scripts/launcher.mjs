@@ -89,6 +89,13 @@ function assembleDeps(config, logger) {
     ? createNdjsonRecorder(path.resolve(clientRoot, config.instance.recording))
     : null;
 
+  // BL-064: the worker's report has no channel — it exists in the child process and crosses MCP
+  // without ever being written down, so a run cannot be graded after the fact. Derived from the
+  // recording so the report is filed with the run it belongs to.
+  const responseLogPath = config.instance?.recording
+    ? `${path.resolve(clientRoot, config.instance.recording)}.responses.ndjson`
+    : null;
+
   // Reuse the cap's cadence for API polling — one knob, not two.
   const pollMs = config.cap?.pollIntervalMs ?? 5000;
   // Bounded because deliverGoal runs BEFORE the cap race starts (see deliverGoal).
@@ -113,6 +120,10 @@ function assembleDeps(config, logger) {
         executionMode: agentCfg.executionMode ?? 'persistent',
         agentId: agentCfg.id,
         workdir: agentCfg.workdir,
+        // BL-064: a SIDECAR beside the run's recording, not the recording itself — the launcher and
+        // the worker are separate processes, and two appenders on one file interleave on a long
+        // report. No recording configured => no sidecar, and the worker logs nothing.
+        responseLog: responseLogPath,
       });
     },
 

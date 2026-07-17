@@ -72,6 +72,31 @@ describe('launcher core', () => {
     expect(core.listAgents()).toEqual([{ agentId: 'a1', pid: 4321, provider: 'claude', model: 'opus', alive: true }]);
   });
 
+  it('BL-064: hands the worker its response-log path when the run records one', async () => {
+    const spawn = vi.fn(() => makeFakeChild());
+    const core = createLauncherCore(baseDeps({ spawn }));
+
+    await core.launchAgent({
+      workdir: WORKDIR, provider: 'gemini', agentId: 'a1',
+      responseLog: '/runs/rung2.ndjson.responses.ndjson',
+    });
+
+    // Without this the report has nowhere to go: the child is spawned stdio:'inherit', so its
+    // reasoning reaches a terminal and no run artifact.
+    const [, , opts] = spawn.mock.calls[0];
+    expect(opts.env.AGENTTALK_RESPONSE_LOG).toBe('/runs/rung2.ndjson.responses.ndjson');
+  });
+
+  it('BL-064: sets no response-log when the run records nothing', async () => {
+    const spawn = vi.fn(() => makeFakeChild());
+    const core = createLauncherCore(baseDeps({ spawn }));
+
+    await core.launchAgent({ workdir: WORKDIR, provider: 'gemini', agentId: 'a1' });
+
+    const [, , opts] = spawn.mock.calls[0];
+    expect(opts.env.AGENTTALK_RESPONSE_LOG).toBeUndefined();
+  });
+
   it('uses the orchestrator-resolved id when no agentId is supplied', async () => {
     const fetch = makeFakeFetch({ create: () => ({ ok: true, status: 200, json: async () => ({ id: 'server-minted' }) }) });
     const core = createLauncherCore(baseDeps({ fetch }));
