@@ -1,7 +1,7 @@
 {
   "instance": {
-    "startCommand": { "command": "node", "args": ["apps/orchestrator/dist/index.js"], "cwd": "../../AgentTalk" },
-    "orchestratorUrl": "http://127.0.0.1:3000",
+    "startCommand": { "command": "node", "args": ["apps/orchestrator/dist/index.js"], "cwd": "../AgentTalk" },
+    "orchestratorUrl": "http://127.0.0.1:3100",
     "readyTimeoutMs": 60000,
     "recording": "runs/bl040-d1d3.ndjson"
   },
