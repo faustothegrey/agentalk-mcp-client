@@ -44,6 +44,17 @@ afterAll(() => {
   rmSync(fixtureDir, { recursive: true, force: true });
 });
 
+// Poll until `cond()` holds, bounded so a genuinely stuck state fails loudly rather
+// than hanging the suite. Replaces fixed sleeps that assume an async event (here the
+// child's 'close') lands within a guessed window (BL-065).
+const waitFor = async (cond, { timeoutMs = 3000, stepMs = 5 } = {}) => {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error('waitFor: condition not met within ' + timeoutMs + 'ms');
+    await new Promise((r) => setTimeout(r, stepMs));
+  }
+};
+
 describe('persistent executor hardening', () => {
   it('rejects a turn whose session is alive but never responds', async () => {
     const executor = persistent(SILENT_BUT_ALIVE);
@@ -83,8 +94,15 @@ describe('persistent executor hardening', () => {
   it('fails a turn loudly when the session died earlier, instead of waiting on a dead child', async () => {
     const executor = persistent(EXITS_WITH_3);
     await executor.initialize();
-    // Let the child exit; no request is in flight, so nothing is pending to reject.
-    await new Promise((r) => setTimeout(r, 250));
+    // Let the child exit AND be observed before the turn arrives. A fixed sleep here is
+    // racy (BL-065): on a cold/loaded run the 'close' event can be processed after the
+    // wait, so executeTurn meets a not-yet-reaped child, writes to it, and the rejection
+    // then comes from the async close handler ("... session exited with code 3") instead
+    // of the synchronous send guard ("... is not available: the session exited with
+    // code 3"). Both are loud and correct, but the test pins the guard's message. Waiting
+    // on the observable state (status -> 'error', which the close handler sets) makes the
+    // guard the deterministic path under test without weakening the assertion.
+    await waitFor(() => executor.getStatus() === 'error');
 
     await expect(executor.executeTurn({ id: 'hc-4', prompt: 'ping' }, { timeoutMs: 5000 })).rejects.toThrow(
       /session is not available: the session exited with code 3/,
