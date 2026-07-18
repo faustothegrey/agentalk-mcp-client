@@ -46,9 +46,12 @@ describe('goose provider wiring', () => {
     expect(args[args.indexOf('-t') + 1]).toBe('DO THING');
   });
 
-  it('defaults the model to openai/gpt-4o-mini when none is given', () => {
-    const { args } = getProviderCommand('goose', null, 'x');
-    expect(args[args.indexOf('--model') + 1]).toBe('openai/gpt-4o-mini');
+  it('BL-024 T3b: requires an explicit model — no silent default (goose is a harness over a model)', () => {
+    expect(() => getProviderCommand('goose', null, 'x')).toThrow(/goose requires an explicit --model/);
+    expect(() => getProviderCommand('goose', '', 'x')).toThrow(/goose requires an explicit --model/);
+    // an explicit model is honoured, verbatim
+    const { args } = getProviderCommand('goose', 'anthropic/claude-3.5-sonnet', 'x');
+    expect(args[args.indexOf('--model') + 1]).toBe('anthropic/claude-3.5-sonnet');
   });
 
   it('parses token usage from stdout despite the leading banner', () => {
