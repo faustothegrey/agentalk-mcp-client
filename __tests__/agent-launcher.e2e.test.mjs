@@ -152,7 +152,8 @@ describe('agent-launcher end-to-end', () => {
     expect(typeof launched.pid).toBe('number');
 
     // -- the orchestrator really received create THEN start, for this id --
-    expect(orch.calls[0]).toMatchObject({ method: 'POST', path: '/api/agents', body: { id: 'e2e-1', provider: 'gemini' } });
+    // BL-024 T3a: the wire carries the transport/vendor axis now (launchAgent's `provider` input is unchanged).
+    expect(orch.calls[0]).toMatchObject({ method: 'POST', path: '/api/agents', body: { id: 'e2e-1', transport: 'attached', vendor: 'gemini' } });
     expect(orch.calls[1]).toMatchObject({ method: 'POST', path: '/api/agents/e2e-1/start' });
 
     // -- the REAL harness attached over WS: initialize (with the wire contract) + await_turn --

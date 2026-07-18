@@ -120,13 +120,34 @@ describe('launcher core', () => {
 
     await core.launchAgent({ workdir: WORKDIR, provider: 'agy', agentId: 'a1' });
 
-    // The orchestrator only records canonical providers (isUsageCaptureProvider);
-    // 'agy' on the wire would be silently dropped, losing usage capture.
-    expect(JSON.parse(fetch.calls[0].opts.body).provider).toBe('gemini');
-    expect(JSON.parse(fetch.calls[1].opts.body).provider).toBe('gemini');
+    // BL-024 T3a: the alias resolves to the canonical vendor BEFORE the wire, and the wire now
+    // carries the transport/vendor axis (not the legacy `provider`). 'agy' must never cross —
+    // it would be dropped, losing the gemini identity.
+    const createBody = JSON.parse(fetch.calls[0].opts.body);
+    const startBody = JSON.parse(fetch.calls[1].opts.body);
+    expect(createBody).toMatchObject({ transport: 'attached', vendor: 'gemini' });
+    expect(startBody).toMatchObject({ transport: 'attached', vendor: 'gemini' });
+    expect(createBody.provider).toBeUndefined();
     expect(spawn.mock.calls[0][1]).toContain('gemini');
     expect(spawn.mock.calls[0][1]).not.toContain('agy');
     expect(core.listAgents()[0].provider).toBe('gemini');
+  });
+
+  it('BL-024 T3a: goose (deferred vendor) stays on the legacy `provider` wire, not transport/vendor', async () => {
+    const spawn = vi.fn(() => makeFakeChild(88));
+    const fetch = makeFakeFetch({ create: () => ({ ok: true, status: 200, json: async () => ({ id: 'g1' }) }) });
+    const core = createLauncherCore(baseDeps({ spawn, fetch }));
+
+    await core.launchAgent({ workdir: WORKDIR, provider: 'goose', agentId: 'g1' });
+
+    // goose is a real vendor whose axis mapping is deferred (BL-024) — until then it must ride the
+    // legacy `provider` field, NOT be forced to opaque `attached` by sending `transport`.
+    const createBody = JSON.parse(fetch.calls[0].opts.body);
+    const startBody = JSON.parse(fetch.calls[1].opts.body);
+    expect(createBody).toMatchObject({ provider: 'goose' });
+    expect(startBody).toMatchObject({ provider: 'goose' });
+    expect(createBody.transport).toBeUndefined();
+    expect(createBody.vendor).toBeUndefined();
   });
 
   it('rejects an unknown provider with 400 before any orchestrator call or spawn', async () => {
