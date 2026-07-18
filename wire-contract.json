@@ -1,6 +1,6 @@
 {
-  "version": 7,
-  "hash": "ffa94e93e3182d44924ed28381870c7bd814c908279942022d5925a4865a9446",
+  "version": 8,
+  "hash": "8df959312e33fa6bf53cd17c36a59f230882b1de86b138ae20d2dc8f9eee3a1a",
   "data": {
     "mcpTools": [
       "list_agents",
@@ -11,7 +11,8 @@
       "submit_usage_stats",
       "await_turn",
       "submit_exec_result",
-      "healthcheck_ack"
+      "healthcheck_ack",
+      "report_environment"
     ],
     "packetTypes": [
       "READY",

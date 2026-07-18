@@ -7,6 +7,7 @@ import { provisionTaskDir } from './lib/task-worktree.mjs';
 import { createRequestIdGenerator } from './lib/request-id.mjs';
 import { createExecutor, normalizeRequestedExecutionMode } from './lib/executor-runtime.mjs';
 import { McpClient } from './lib/mcp-client.mjs';
+import { captureHostEnvironment } from './lib/environment.mjs';
 import { getProviderLimit, resolveProvider } from './lib/provider-runtime.mjs';
 import { createResponseRecorder } from './lib/response-log.mjs';
 
@@ -239,6 +240,17 @@ async function main() {
   const mcpUrl = process.env.AGENTTALK_PERSISTENT_MCP_URL || `ws://localhost:3000/mcp`;
   mcpClient = new McpClient(appendAgentId(mcpUrl, agentId));
   await mcpClient.connect();
+
+  // BL-071 P2 — report our own host to the orchestrator once, right after connect.
+  // Fire-and-forget ON PURPOSE: the env is non-critical metadata, so it must NOT gate
+  // the turn loop nor stall the agent if the peer is slow or doesn't ack it. The call
+  // still goes out on the wire (ordered before the first await_turn); we just don't
+  // block on its response. .catch keeps a late rejection (e.g. socket close) from
+  // becoming an unhandled rejection.
+  mcpClient
+    .callTool('report_environment', { environment: captureHostEnvironment() })
+    .then(() => console.error(`[llm-agent] Reported host environment to orchestrator.`))
+    .catch((err) => console.error(`[llm-agent] Failed to report host environment (non-fatal):`, err.message));
 
   let loopActive = false;
   async function loop() {

@@ -35,6 +35,11 @@ async function createMockMcp() {
         ws.send(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'mock', version: '1.0' } } }));
       } else if (msg.method === 'tools/call' && msg.params?.name === 'await_turn') {
         pending = { ws, id: msg.id };                       // hold it; test decides whether to deliver
+      } else if (msg.method === 'tools/call' && msg.params?.name === 'report_environment') {
+        // BL-071 P2 — the env report is metadata, NOT a turn completion. The real
+        // orchestrator just acks it (stores the host); mirror that here so it does
+        // not spuriously resolve the outcome and pre-empt the wall-clock cap.
+        ws.send(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'ok' }] } }));
       } else if (msg.method === 'tools/call') {             // any submit_* → the worker finished a turn
         ws.send(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'ok' }] } }));
         resolveOutcome({ tool: msg.params.name, args: msg.params.arguments });
