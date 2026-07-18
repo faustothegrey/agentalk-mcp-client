@@ -133,21 +133,29 @@ describe('launcher core', () => {
     expect(core.listAgents()[0].provider).toBe('gemini');
   });
 
-  it('BL-024 T3a: goose (deferred vendor) stays on the legacy `provider` wire, not transport/vendor', async () => {
+  it('BL-024 T3b: goose is a first-class vendor — cuts over to {transport,vendor} with its model', async () => {
     const spawn = vi.fn(() => makeFakeChild(88));
     const fetch = makeFakeFetch({ create: () => ({ ok: true, status: 200, json: async () => ({ id: 'g1' }) }) });
     const core = createLauncherCore(baseDeps({ spawn, fetch }));
 
-    await core.launchAgent({ workdir: WORKDIR, provider: 'goose', agentId: 'g1' });
+    await core.launchAgent({ workdir: WORKDIR, provider: 'goose', model: 'openai/gpt-4o-mini', agentId: 'g1' });
 
-    // goose is a real vendor whose axis mapping is deferred (BL-024) — until then it must ride the
-    // legacy `provider` field, NOT be forced to opaque `attached` by sending `transport`.
+    // goose now rides the transport/vendor axis like the others; its model crosses the wire too.
     const createBody = JSON.parse(fetch.calls[0].opts.body);
     const startBody = JSON.parse(fetch.calls[1].opts.body);
-    expect(createBody).toMatchObject({ provider: 'goose' });
-    expect(startBody).toMatchObject({ provider: 'goose' });
-    expect(createBody.transport).toBeUndefined();
-    expect(createBody.vendor).toBeUndefined();
+    expect(createBody).toMatchObject({ transport: 'attached', vendor: 'goose', model: 'openai/gpt-4o-mini' });
+    expect(startBody).toMatchObject({ transport: 'attached', vendor: 'goose' });
+    expect(createBody.provider).toBeUndefined();
+  });
+
+  it('BL-024 T3b: goose with NO model is rejected (400) before any orchestrator call or spawn', async () => {
+    const deps = baseDeps();
+    const core = createLauncherCore(deps);
+    await expect(core.launchAgent({ workdir: WORKDIR, provider: 'goose', agentId: 'g1' }))
+      .rejects.toMatchObject({ statusCode: 400 });
+    // goose is a harness over a model — no model means no agent; fail fast, touch nothing.
+    expect(deps.fetch).not.toHaveBeenCalled();
+    expect(deps.spawn).not.toHaveBeenCalled();
   });
 
   it('rejects an unknown provider with 400 before any orchestrator call or spawn', async () => {
