@@ -29,6 +29,21 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const clientRoot = path.resolve(__dirname, '..');
 const llmAgentPath = path.join(clientRoot, 'llm-agent.mjs');
 
+// BL-081: the process the launcher spawns is typically a WRAPPER (`npm run backend`); the real
+// server is its child. Signalling the wrapper alone leaves that child alive, reparented to init,
+// still holding the port — observed live after the BL-080 spike (pid 69131, PPID 1, port 3400).
+// `detached: true` at spawn makes the wrapper a process-GROUP leader, so a negative pid signals the
+// whole tree. The direct-kill fallback keeps teardown no worse than before if the group is already
+// gone or was never created.
+function killTree(proc, signal) {
+  if (!proc?.pid) return;
+  try {
+    process.kill(-proc.pid, signal);
+  } catch {
+    try { proc.kill(signal); } catch { /* already gone */ }
+  }
+}
+
 // --- D1: boot the orchestrator, wait for ready, capture the DYNAMIC MCP url it announces ---
 function makeStartInstance(logger) {
   return (instanceCfg = {}) => new Promise((resolve, reject) => {
@@ -38,7 +53,12 @@ function makeStartInstance(logger) {
       return resolve({ proc: null, orchestratorUrl: instanceCfg.orchestratorUrl, mcpUrl: instanceCfg.mcpUrl });
     }
     const cwd = sc.cwd ? path.resolve(clientRoot, sc.cwd) : process.cwd();
-    const proc = spawn(sc.command, sc.args ?? [], { cwd, env: { ...process.env, ...(instanceCfg.env || {}) } });
+    const proc = spawn(sc.command, sc.args ?? [], {
+      cwd,
+      env: { ...process.env, ...(instanceCfg.env || {}) },
+      // BL-081: own process group, so teardown can signal the whole tree (see killTree).
+      detached: true,
+    });
 
     let mcpUrl = instanceCfg.mcpUrl ?? null;
     let sawReady = false;
@@ -46,7 +66,7 @@ function makeStartInstance(logger) {
     let buf = '';
     const readyTimeoutMs = instanceCfg.readyTimeoutMs ?? 60000;
     const timer = setTimeout(() => {
-      if (!resolved) { try { proc.kill('SIGKILL'); } catch { /* gone */ } reject(new Error(`instance not ready within ${readyTimeoutMs}ms`)); }
+      if (!resolved) { killTree(proc, 'SIGKILL'); reject(new Error(`instance not ready within ${readyTimeoutMs}ms`)); }
     }, readyTimeoutMs);
 
     // The orchestrator prints "Ready to manage agents." BEFORE it announces its (dynamic) MCP url,
@@ -84,7 +104,7 @@ async function fetchJson(url, init) {
   catch { throw new Error(`${url} returned non-JSON: ${text.slice(0, 200)}`); }
 }
 
-function assembleDeps(config, logger) {
+export function assembleDeps(config, logger) {
   const recorder = config.instance?.recording
     ? createNdjsonRecorder(path.resolve(clientRoot, config.instance.recording))
     : null;
@@ -213,9 +233,9 @@ function assembleDeps(config, logger) {
 
     stopInstance: async (instance) => {
       if (instance?.proc) {
-        try { instance.proc.kill('SIGTERM'); } catch { /* gone */ }
+        killTree(instance.proc, 'SIGTERM');
         await new Promise((r) => setTimeout(r, 500));
-        try { instance.proc.kill('SIGKILL'); } catch { /* gone */ }
+        killTree(instance.proc, 'SIGKILL');
       }
     },
 
@@ -241,4 +261,8 @@ async function main() {
   process.exit(outcome.status === 'completed' ? 0 : 1);
 }
 
-main().catch((e) => { console.error('[launcher] FATAL', e); process.exit(1); });
+// Run main() only when executed as a script. Importing this module (the tests do, to exercise
+// the real startInstance/stopInstance pair against a real process tree) must not self-execute.
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((e) => { console.error('[launcher] FATAL', e); process.exit(1); });
+}
