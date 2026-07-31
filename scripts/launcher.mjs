@@ -24,6 +24,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createBite0Runner, createNdjsonRecorder } from '../lib/bite0-launcher.mjs';
 import { createLauncherCore } from '../lib/agent-launcher.mjs';
+import { isMainModule } from '../lib/is-main.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const clientRoot = path.resolve(__dirname, '..');
@@ -263,6 +264,6 @@ async function main() {
 
 // Run main() only when executed as a script. Importing this module (the tests do, to exercise
 // the real startInstance/stopInstance pair against a real process tree) must not self-execute.
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMainModule(import.meta.url)) {
   main().catch((e) => { console.error('[launcher] FATAL', e); process.exit(1); });
 }
