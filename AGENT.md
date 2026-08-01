@@ -1,5 +1,8 @@
-> **Canonical file.** `AGENT.md` is the single source; **`AGENTS.md` and `CLAUDE.md` are symlinks to it**
-> (one file, three names for different tools). **Edit `AGENT.md` only.**
+> **Canonical file.** `AGENT.md` is the single source; **`AGENTS.md`, `CLAUDE.md` and `GEMINI.md` are symlinks
+> to it** (one file, four names for different tools). **Edit `AGENT.md` only.**
+> *(`GEMINI.md` added 2026-08-02: [[BL-086]] shipped the other three, so a gemini worker launched here inherited
+> nothing by its own convention while it did in AgentTalk. Governance is only inherited through the name the
+> provider actually reads.)*
 
 # agentalk-mcp-client — rules of engagement
 
