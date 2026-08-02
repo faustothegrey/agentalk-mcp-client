@@ -1,4 +1,7 @@
-node_modules/
+# No trailing slash, deliberately (BL-105): a trailing slash matches DIRECTORIES only, and in a
+# worktree provisioned by `scripts/wt-setup.mjs` this is a SYMLINK to the primary's install — which
+# `node_modules/` does not match, leaving it as untracked dirt in every `git status`.
+node_modules
 .DS_Store
 
 # Bite 0 launcher run artifacts (NDJSON recordings + run logs)

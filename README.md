@@ -72,6 +72,34 @@ per-task git worktree (via the launcher's `workdir`) — its changes reach `mast
 on-demand launcher + a real spawned harness, including a real wall-clock cap terminating a real hung process. The
 production runner against a *live* AgentTalk instance + an authed provider CLI is the PO-babysat acceptance step.
 
+## Working in a git worktree (`scripts/wt-setup.mjs`)
+
+All code development in this repo happens in a **per-task git worktree** on a task branch. `git worktree add`
+copies every tracked file and **no `node_modules`** (it is gitignored, and git does not copy ignored files), so
+a fresh worktree cannot run a single command — `npm test` there dies with `sh: vitest: command not found`.
+This helper is the fix, and it needs no dependencies of its own:
+
+```bash
+# from the primary checkout — create the worktree and provision it in one step
+node scripts/wt-setup.mjs /tmp/att-my-task my-task-branch
+
+# …or, in a worktree you already created with plain git
+cd /tmp/att-my-task && node ../path/to/repo/scripts/wt-setup.mjs   # or just: node scripts/wt-setup.mjs
+```
+
+It links the worktree's `node_modules` at the **primary checkout's**, which it derives with
+`git worktree list --porcelain` (the main working tree is listed first, from anywhere) — no path to your machine
+is configured or baked in. It is idempotent, it refuses to touch the primary checkout, and it never deletes a
+real `node_modules` directory.
+
+**It deliberately does not run `npm install`.** The committed `package-lock.json` disagrees with `package.json`
+about a bin name (tracked as BL-100, reserved to the PO), so any install resyncs the lockfile and leaves a
+modified **tracked** file behind on every run. Provisioning leaves tracked files untouched; if the primary has
+no install yet, the tool says so and stops rather than creating one. A whole-directory link is the right shape
+*for this repo* because it declares no npm `workspaces` and nothing in its `node_modules` links back into the
+checkout's own source — see the header of `scripts/wt-setup.mjs` for the full argument, and for the condition
+that would invalidate it.
+
 ## Contract Alignment & Hash Verification
 
 Because the Orchestrator and the Client share no common codebase, they communicate using a strictly enforced, byte-identical wire contract.
