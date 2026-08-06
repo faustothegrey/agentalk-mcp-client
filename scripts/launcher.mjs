@@ -24,6 +24,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createBite0Runner, createNdjsonRecorder } from '../lib/bite0-launcher.mjs';
 import { createLauncherCore } from '../lib/agent-launcher.mjs';
+import { releaseTaskDirs } from '../lib/task-worktree.mjs';
 import { isMainModule } from '../lib/is-main.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -220,6 +221,11 @@ export function assembleDeps(config, logger) {
       try { instance._bl037?.terminateAgent(agentId); }
       catch (e) { logger.error?.(`[launcher] terminate ${agentId}: ${e?.message}`); }
     },
+
+    // BL-103 — give back the task worktrees provisionTaskDir took. Cannot destroy work:
+    // `worktree remove` without --force and `branch -d` never `-D`, so uncommitted changes and
+    // unmerged commits both win and are reported instead. No workdir configured -> nothing to do.
+    releaseTaskDirs: async (agentCfg = {}) => (agentCfg.workdir ? releaseTaskDirs(agentCfg.workdir) : null),
 
     // Real resource meter (:9899) — parse the capped provider's session %.
     // BL-114: FAIL CLOSED. This used to end `: 0`, so a provider block with no
