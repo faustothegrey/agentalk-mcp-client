@@ -104,18 +104,95 @@ describe('bite0 runner', () => {
     expect(deps.stopInstance).toHaveBeenCalled();
   });
 
-  it('meter breach: resource ceiling exceeded → FAILED (cap-resource) + terminate', async () => {
-    // baseline read at start = 10; poll read = 16 → delta 6 ≥ 5
+  // BL-117 — DELIBERATE CONTRACT CHANGE, ratified by the PO 2026-08-05 (option b).
+  // This test previously asserted `status: 'failed', reason: 'cap-resource'` — i.e. the meter cap
+  // TERMINATED the run. It no longer does, and that is the fix, not a weakened bar: the meter reports
+  // machine-wide per-provider percentages and cannot separate the worker's spend from the supervising
+  // session's, so it fires on the sum. On hmp5 it killed complete, verified work 14s after the commit.
+  // The rail keeps its reading and its record; it loses only the authority to kill.
+  it('meter breach: WARNS and the run CONTINUES — the wall-clock rail is what terminates', async () => {
+    // baseline read at start = 10; poll read = 16 → delta 6 ≥ 5 → breach territory
     const readMeterPercent = vi.fn().mockResolvedValueOnce(10).mockResolvedValue(16);
-    const { deps, timers } = baseDeps({ readMeterPercent });
+    const events = [];
+    const { deps, timers } = baseDeps({ readMeterPercent, record: (e) => events.push(e) });
     const runner = createBite0Runner(deps);
     const p = runner.run(cfg());
     await flush();
-    timers.fire(5000);   // poll tick → reads 16, delta 6 ≥ 5 → breach
+
+    timers.fire(5000);   // poll tick → reads 16, delta 6 ≥ 5
     await flush();
-    const res = await p;
-    expect(res).toMatchObject({ status: 'failed', reason: 'cap-resource' });
+
+    // The load-bearing assertion: the meter did NOT end the run.
+    expect(deps.terminateAgent).not.toHaveBeenCalled();
+    const warning = events.find((e) => e.event === 'cap-warning');
+    expect(warning).toMatchObject({ reason: 'meter', delta: 6, threshold: 5 });
+    expect(warning.note).toMatch(/not worker-attributable/i);
+
+    // …and the run is still live, ended only by the wall-clock rail.
+    timers.fire(600000);
+    await flush();
+    expect(await p).toMatchObject({ status: 'failed', reason: 'cap-wallclock' });
     expect(deps.terminateAgent).toHaveBeenCalled();
+  });
+
+  it('meter breach warns ONCE, not on every poll tick', async () => {
+    const readMeterPercent = vi.fn().mockResolvedValueOnce(10).mockResolvedValue(99);
+    const events = [];
+    const { deps, timers } = baseDeps({ readMeterPercent, record: (e) => events.push(e) });
+    const runner = createBite0Runner(deps);
+    const p = runner.run(cfg());
+    await flush();
+    for (let i = 0; i < 3; i++) { timers.fire(5000); await flush(); }   // three breaching ticks
+    expect(events.filter((e) => e.event === 'cap-warning')).toHaveLength(1);
+    timers.fire(600000);
+    await flush();
+    await p;
+  });
+
+  // --- BL-114: the meter read fails CLOSED, on BOTH paths ----------------------------------------
+  it('BL-114 (i): an unreadable meter never fires the rail, and is RECORDED rather than read as 0', async () => {
+    const readMeterPercent = vi.fn(async () => { throw new Error('meter down'); });
+    const events = [];
+    const { deps, timers } = baseDeps({ readMeterPercent, record: (e) => events.push(e) });
+    const runner = createBite0Runner(deps);
+    const p = runner.run(cfg());
+    await flush();
+    for (let i = 0; i < 3; i++) { timers.fire(5000); await flush(); }
+    expect(deps.terminateAgent).not.toHaveBeenCalled();
+    expect(events.find((e) => e.event === 'meter-baseline-unavailable')).toBeTruthy();
+    expect(events.filter((e) => e.event === 'meter-unreadable').length).toBeGreaterThan(0);
+    // the wall-clock rail is untouched by any of this
+    timers.fire(600000);
+    await flush();
+    expect(await p).toMatchObject({ status: 'failed', reason: 'cap-wallclock' });
+  });
+
+  // ⭐ THE REGRESSION PIN. On the pre-BL-114 code a failed baseline read was coerced to 0, so the
+  // first successful poll computed `40 - 0 = 40` ≥ 5 and breached instantly — on a worker that had
+  // spent nothing. Fixing only the poll path (which is all BL-114's own text names) would have
+  // shipped exactly that. Unknown must stay unknown until a reading can be trusted.
+  it('BL-114 (ii): unreadable at baseline, readable later → NO breach; the baseline is established late', async () => {
+    const readMeterPercent = vi.fn()
+      .mockRejectedValueOnce(new Error('meter down at launch'))   // baseline read fails
+      .mockResolvedValue(40);                                     // …then the meter comes back at 40%
+    const events = [];
+    const { deps, timers } = baseDeps({ readMeterPercent, record: (e) => events.push(e) });
+    const runner = createBite0Runner(deps);
+    const p = runner.run(cfg());
+    await flush();
+
+    timers.fire(5000);   // first successful read → ESTABLISHES the baseline, compares nothing
+    await flush();
+    expect(events.find((e) => e.event === 'meter-baseline-established')).toMatchObject({ percent: 40, late: true });
+
+    timers.fire(5000);   // now a real comparison: 40 - 40 = 0
+    await flush();
+    expect(events.find((e) => e.event === 'cap-warning')).toBeUndefined();
+    expect(deps.terminateAgent).not.toHaveBeenCalled();
+
+    timers.fire(600000);
+    await flush();
+    expect(await p).toMatchObject({ status: 'failed', reason: 'cap-wallclock' });
   });
 
   it('meter under ceiling: poll re-arms, does not falsely breach', async () => {
