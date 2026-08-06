@@ -222,11 +222,20 @@ export function assembleDeps(config, logger) {
     },
 
     // Real resource meter (:9899) — parse the capped provider's session %.
+    // BL-114: FAIL CLOSED. This used to end `: 0`, so a provider block with no
+    // `used_percent` produced a clean, plausible zero — the delta went negative and the rail
+    // could never fire while looking perfectly healthy. "Could not read" and "read zero" are
+    // different facts and must not share a representation. Throwing routes this into the
+    // caller's existing skip-a-tick path, which keeps the run going (LB-11: the meter is
+    // jittery by nature, so an unreadable meter must never fail a run).
     readMeterPercent: async (meterCfg = {}) => {
       const res = await fetch(`${meterCfg.url}/usage`);
       const j = await res.json();
       const pct = j?.[meterCfg.provider]?.parsed?.current_session?.used_percent;
-      return typeof pct === 'number' ? pct : 0;
+      if (typeof pct !== 'number') {
+        throw new Error(`meter unreadable: no current_session.used_percent for provider "${meterCfg.provider}"`);
+      }
+      return pct;
     },
 
     setTimer: (ms, cb) => setTimeout(cb, ms),

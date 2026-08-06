@@ -102,6 +102,37 @@ const {
   ...(persistentCommandOverride ? { persistentCommandOverride } : {}),
 });
 
+// BL-118: a signal must take the provider CLI down with us.
+//
+// `terminateAgent` (lib/agent-launcher.mjs:201) signals THIS pid only — it is not a process-group
+// kill — and the provider CLI is a GRANDCHILD, spawned inside executor.initialize()
+// (lib/executor-runtime.mjs:171). Node's default signal disposition kills us instantly without
+// running any cleanup, so before this handler a cap kill terminated the supervisor of the work and
+// left the thing actually spending tokens alive. BasePersistentExecutor.close() already kills its
+// child; only this wiring was missing.
+//
+// Deliberately NOT a process-group kill: that would signal everything sharing the group, including
+// things a future caller has not thought about. Keeping the blast radius inside the agent is the point.
+//
+// The deadline is MANDATORY, not defensive. If close() hangs and we simply waited, SIGTERM would
+// become effectively ignorable and a leaked process would turn into an UNKILLABLE worker — strictly
+// worse than the bug this fixes. So we always exit, on time, either way.
+const SIGNAL_SHUTDOWN_DEADLINE_MS = 3000;
+let signalShutdownStarted = false;
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => {
+    if (signalShutdownStarted) return;   // a second signal must not race the first
+    signalShutdownStarted = true;
+    isShuttingDown = true;
+    const code = sig === 'SIGINT' ? 130 : 143;   // 128 + signal number, by convention
+    const hardExit = setTimeout(() => process.exit(code), SIGNAL_SHUTDOWN_DEADLINE_MS);
+    Promise.resolve()
+      .then(() => executor.close?.())
+      .catch(() => { /* a failing close must not stop us exiting */ })
+      .finally(() => { clearTimeout(hardExit); process.exit(code); });
+  });
+}
+
 function handleExecRpc(evt) {
   busy = true;
   // BL-061: provisioning runs INSIDE the chain so that a failure to provide the task dir the
